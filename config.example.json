@@ -1,0 +1,59 @@
+{
+  "mode": "auto",
+  "search_provider": "duckduckgo",
+  "max_rounds": 3,
+  "results_per_query": 4,
+  "max_sources": 16,
+  "request_timeout": 8.0,
+  "fetch_workers": 8,
+  "reports_dir": "reports",
+  "cache_dir": ".cache/deepsearch",
+  "cache_ttl_seconds": 21600,
+  "cache_enabled": true,
+  "per_domain_limit": 2,
+  "log_level": "INFO",
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "api_key": ""
+  },
+  "customer_service": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:8000",
+    "request_timeout": 15.0,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": 1.0,
+    "outbox_dir": ".cache/customer-service-outbox",
+    "integration_key": "",
+    "api_access_key": ""
+  },
+  "research_tasks": [
+    {
+      "schema_version": 2,
+      "name": "AI 行业日报",
+      "question": "总结最近一天大模型与 AI Agent 领域的重要变化",
+      "schedule_type": "daily",
+      "run_time": "10:00",
+      "weekdays": [0, 1, 2, 3, 4],
+      "run_date": "",
+      "enabled": false,
+      "profile": "深度",
+      "deliver_to_customer_service": true,
+      "data_classification": "internal",
+      "brief": {
+        "domain": "人工智能与大模型",
+        "objective": "形成包含事实、影响判断和行动建议的行业日报",
+        "information_types": ["新闻", "公告", "研究"],
+        "time_scope": "最近 24 小时",
+        "report": {
+          "output_format": "markdown",
+          "target_words": 1800,
+          "audience": "技术负责人",
+          "language": "中文",
+          "sections": ["摘要", "重大事件", "技术进展", "行业影响", "建议与下一步"],
+          "custom_instructions": "按重要性排序，区分已确认事实和分析判断"
+        }
+      }
+    }
+  ]
+}
