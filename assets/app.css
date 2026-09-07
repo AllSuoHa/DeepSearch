@@ -1,71 +1,265 @@
-:root {
-  --ds-primary: #4f46e5;
-  --ds-text: #172033;
-  --ds-muted: #667085;
-  --ds-border: #e4e7ec;
-}
-
-.stApp { background: #ffffff; }
 [data-testid="stHeader"] {
-  background: rgba(255, 255, 255, .92);
-  border-bottom: 1px solid rgba(228, 231, 236, .75);
-  backdrop-filter: blur(12px);
-}
-[data-testid="stNavigation"] { background: #ffffff; border-bottom: 1px solid var(--ds-border); }
-[data-testid="stSidebar"] { background: #f8fafc; }
-[data-testid="stMainBlockContainer"] { max-width: 1120px; padding-top: 2.4rem; padding-bottom: 4rem; }
-
-h1 { letter-spacing: -.035em !important; line-height: 1.12 !important; }
-h2, h3 { letter-spacing: -.02em !important; }
-
-.st-key-hero {
-  padding: clamp(2rem, 5vw, 4.5rem);
-  border: 1px solid #e3e8ff;
-  border-radius: 20px;
-  background: linear-gradient(135deg, #fafbff 0%, #f5f7ff 55%, #f0f9ff 100%);
+  /* 顶部工具栏由 client.toolbarMode 隐藏；这里同时移除 Streamlit
+     的背景和分隔线。保留透明的原生高度，让折叠按钮和 logo 不被裁切。 */
+  height: 3.75rem;
+  min-height: 3.75rem;
+  background: transparent;
+  border-bottom: 0;
+  backdrop-filter: none;
+  overflow: visible;
+  pointer-events: none;
 }
 
-.st-key-composer,
-.st-key-scorecard,
-.st-key-workbench,
-.st-key-system-card {
-  padding: 1.1rem 1.2rem;
-  border: 1px solid var(--ds-border);
+/* 页眉本身不拦截正文点击，但折叠侧栏按钮仍必须可操作。 */
+[data-testid="stHeader"] [data-testid="stSidebarCollapsedControl"] {
+  pointer-events: auto;
+}
+
+[data-testid="stDecoration"] {
+  display: none;
+}
+
+[data-testid="stMainBlockContainer"] {
+  max-width: 920px;
+  padding-top: 1.35rem;
+  padding-bottom: 10rem;
+}
+
+[data-testid="stSidebar"] button {
+  text-align: left;
+}
+
+h1 {
+  letter-spacing: -.035em !important;
+  line-height: 1.12 !important;
+}
+
+h2, h3 {
+  letter-spacing: -.02em !important;
+}
+
+.st-key-empty-state {
+  min-height: min(48vh, 430px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.st-key-empty-state [data-testid="stCaptionContainer"] {
+  color: color-mix(in srgb, currentColor 62%, transparent);
+}
+
+/* 首页、侧栏和助手头像统一使用 travel_explore；固定外层确保图标
+   在桌面端和窄屏上都与标题严格共用视觉中线。 */
+.st-key-home-logo {
+  margin-inline: auto;
+  margin-bottom: -.4rem;
+}
+
+.st-key-home-logo [data-testid="stMarkdownContainer"] {
+  font-size: 3.25rem;
+  line-height: 1;
+  text-align: center;
+  color: var(--text-color);
+}
+
+.st-key-home-logo [data-testid="stMarkdownContainer"] p {
+  margin: 0;
+  line-height: 1;
+  color: var(--text-color);
+}
+
+.st-key-prompt-shortcuts {
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* 快捷输入说明使用纯 hover 提示，不绑定按钮 focus，因此点击后不会产生
+   Streamlit 原生 help 气泡。content 由页面按收藏 ID 安全注入。 */
+[class*="st-key-shortcut-"] {
+  position: relative;
+}
+
+[class*="st-key-shortcut-"]::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + .6rem);
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: .55rem .72rem;
+  border: 1px solid rgba(255, 255, 255, .86);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, .76);
+  color: rgba(35, 43, 56, .62);
+  box-shadow: 0 8px 26px rgba(31, 41, 55, .10);
+  backdrop-filter: blur(14px) saturate(125%);
+  -webkit-backdrop-filter: blur(14px) saturate(125%);
+  font-size: .78rem;
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: .01em;
+  text-shadow: 0 1px 2px rgba(255, 255, 255, .85);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, .25rem);
+  transition: opacity .14s ease, transform .14s ease, visibility .14s ease;
+  transition-delay: .28s;
+  z-index: 1000;
+}
+
+[class*="st-key-shortcut-"]:hover::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+[class*="st-key-shortcut-"]:focus-within::after {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.st-key-composer-shell {
+  width: min(100%, 880px);
+  margin-inline: auto;
+  padding: .4rem .48rem .45rem;
+  border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--background-color, #fff) 96%, currentColor 4%);
+  box-shadow: 0 10px 34px rgba(15, 23, 42, .09), 0 1px 3px rgba(15, 23, 42, .05);
+  backdrop-filter: blur(18px);
+}
+
+/* 去掉 chat_input 自己的卡片边界，让输入和下方工具栏成为一个整体。 */
+.st-key-composer-shell [data-testid="stChatInput"] {
+  min-height: 54px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.st-key-composer-shell [data-testid="stChatInput"] > div {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.st-key-composer-shell [data-testid="stChatInput"] textarea {
+  min-height: 44px;
+  padding-top: .78rem;
+  padding-bottom: .55rem;
+  font-size: .96rem;
+  line-height: 1.5;
+}
+
+.st-key-composer-shell [data-testid="stChatInput"] button {
+  margin-right: .25rem;
+  border-radius: 999px;
+}
+
+.st-key-composer-toolbar {
+  padding: .05rem .35rem .1rem;
+  gap: .45rem;
+}
+
+.st-key-composer-toolbar [data-testid="stSegmentedControl"] {
+  opacity: .88;
+}
+
+.st-key-composer-stop-generation {
+  margin-left: auto;
+}
+
+.st-key-composer-stop-generation button {
+  border-color: rgba(185, 28, 28, .18);
+  background: rgba(254, 226, 226, .68);
+  color: #b91c1c;
+}
+
+.st-key-composer-stop-generation button:hover {
+  border-color: rgba(185, 28, 28, .28);
+  background: rgba(254, 202, 202, .72);
+  color: #991b1b;
+}
+
+.st-key-conversation-thread {
+  padding-top: .9rem;
+}
+
+.st-key-run-stop-notice {
+  margin-top: .15rem;
+  opacity: .68;
+}
+
+[data-testid="stChatMessage"] {
+  border: 0;
+  background: transparent;
+  padding-left: 0;
+  padding-right: 0;
+  align-items: flex-start;
+}
+
+/* 清掉聊天内容首元素的默认上边距，让头像与首行文字或标题对齐。 */
+[data-testid="stChatMessageContent"] [data-testid="stMarkdownContainer"] > :first-child {
+  margin-top: 0;
+}
+
+[data-testid="stChatMessageAvatarAssistant"] {
+  margin-top: .18rem;
+}
+
+[data-testid="stStatusWidget"],
+[data-testid="stExpander"] {
+  border-color: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+[class*="st-key-result-card-"] {
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
   border-radius: 14px;
-  background: #ffffff;
+  background: color-mix(in srgb, var(--background-color, #fff) 98%, currentColor 2%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .045);
 }
 
-.st-key-feature-grid [data-testid="stVerticalBlockBorderWrapper"] {
-  min-height: 156px;
-  background: #ffffff;
-  border-color: var(--ds-border);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, .03);
+.st-key-result-actions {
+  margin-top: .75rem;
+  padding-top: .75rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
 }
 
-.ds-kicker {
-  color: var(--ds-primary);
-  font-size: .76rem;
-  font-weight: 700;
-  letter-spacing: .1em;
-  text-transform: uppercase;
+/* 操作按钮只按文字所需宽度占位。父容器允许换行，因此窄屏下不会
+   挤压标签或产生半截的下拉箭头。 */
+.st-key-result-actions button {
+  white-space: nowrap;
 }
-.ds-subtitle { color: var(--ds-muted); font-size: 1rem; line-height: 1.7; max-width: 700px; }
 
-[data-testid="stMetric"] {
-  padding: .85rem 1rem;
-  border: 1px solid var(--ds-border);
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, .025);
-}
-[data-testid="stMetricValue"] { color: var(--ds-text); }
-[data-testid="stChatMessage"] { border: 1px solid var(--ds-border); border-radius: 14px; background: #ffffff; }
-[data-testid="stStatusWidget"] { border-color: var(--ds-border); background: #fbfcfe; }
-[data-testid="stExpander"] { border-color: var(--ds-border); }
-.st-key-hero-start button, .st-key-start-new button { font-weight: 600; }
+@media (max-width: 768px) {
+  [data-testid="stMainBlockContainer"] {
+    padding-top: .85rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    padding-bottom: 11rem;
+  }
 
-@media (max-width: 760px) {
-  [data-testid="stMainBlockContainer"] { padding-top: 2.5rem; }
-  .st-key-hero { padding: 1.5rem; border-radius: 16px; }
-  .st-key-feature-grid [data-testid="stVerticalBlockBorderWrapper"] { min-height: auto; }
+  .st-key-empty-state {
+    min-height: 36vh;
+  }
+
+  .st-key-composer-shell {
+    width: 100%;
+    padding: .3rem .35rem .35rem;
+    border-radius: 20px;
+  }
+
+  .st-key-composer-shell [data-testid="stChatInput"] {
+    min-height: 52px;
+  }
+
+  .st-key-composer-toolbar {
+    padding-inline: .2rem;
+  }
 }

@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 from deepsearch import DeepSearchAgent
-from deepsearch.infrastructure.config import Settings
+from deepsearch.application.errors import ResearchModelRequiredError, SearchUnavailableError
+from deepsearch.infrastructure.config import LLMSettings, Settings
 from deepsearch.infrastructure.search.base import SearchProvider
 
 
@@ -31,15 +32,19 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result.validation.valid)
             self.assertTrue(result.report_path.exists())
             self.assertIn("[1]", result.report)
-            self.assertIn("October 7, 2024", result.report.split("## 关键结论", 1)[0])
-            self.assertIn("## 建议与下一步", result.report)
-            self.assertIn("## 研究过程", result.report)
-            self.assertIn("## 全部来源", result.report)
+            self.assertIn("October 7, 2024", result.report.split("## 关键发现", 1)[0])
+            self.assertIn("## 结论", result.report)
+            self.assertIn("## 关键发现", result.report)
+            self.assertIn("## 分析", result.report)
+            self.assertIn("## 局限", result.report)
+            self.assertIn("## 参考来源", result.report)
+            self.assertNotIn("## 研究过程", result.report)
             self.assertEqual(events[0][0], "plan")
             self.assertEqual(len(result.trace), 1)
             self.assertGreaterEqual(result.metrics.search_results, 1)
-            self.assertGreater(result.scorecard.overall, 0)
+            self.assertEqual(result.scorecard.overall, 0)
             self.assertEqual(len(result.scorecard.dimensions), 5)
+            self.assertNotIn("多源验证", result.report)
 
     def test_complex_question_iterates_and_builds_comparison_table(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -69,12 +74,25 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(any(phase == "search" for phase, _ in events))
             self.assertNotEqual(result.stop_reason, "复用已有研究上下文")
 
-    def test_empty_online_provider_degrades_to_mock(self):
+    def test_online_research_without_model_stops_before_search(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = Settings(mode="auto", reports_dir=Path(directory), cache_dir=Path(directory) / "cache", max_rounds=1)
-            result = DeepSearchAgent(settings, search_providers=[EmptySearch()]).research("Python 3.13 什么时候发布")
-            self.assertTrue(result.sources)
-            self.assertTrue(all(source.provider == "mock" for source in result.sources))
+            with self.assertRaises(ResearchModelRequiredError):
+                DeepSearchAgent(settings, search_providers=[EmptySearch()]).research("Python 3.13 什么时候发布")
+
+    def test_empty_online_provider_fails_without_mock_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(
+                runtime_mode="online",
+                reports_dir=Path(directory),
+                cache_dir=Path(directory) / "cache",
+                max_rounds=1,
+                llm=LLMSettings(api_key="configured-for-test"),
+            )
+            agent = DeepSearchAgent(settings, search_providers=[EmptySearch()])
+            with self.assertRaises(SearchUnavailableError):
+                agent.research("Python 3.13 什么时候发布")
+            self.assertEqual(list(Path(directory).glob("*.md")), [])
 
 
 if __name__ == "__main__":

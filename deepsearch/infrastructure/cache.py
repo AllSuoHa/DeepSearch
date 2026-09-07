@@ -14,6 +14,8 @@ from ..domain.models import SearchResult, Source
 
 @dataclass(slots=True)
 class CacheStats:
+    """用于单次研究指标计算的累计命中与未命中数。"""
+
     hits: int = 0
     misses: int = 0
 
@@ -29,6 +31,8 @@ class ResearchCache:
         self._write_lock = threading.Lock()
 
     def get_search(self, provider: str, query: str, limit: int) -> list[SearchResult] | None:
+        """读取某搜索源和查询组合的缓存结果。"""
+
         data = self._get("search", f"{provider}|{limit}|{query}")
         if data is None:
             return None
@@ -38,9 +42,13 @@ class ResearchCache:
             return None
 
     def set_search(self, provider: str, query: str, limit: int, results: list[SearchResult]) -> None:
+        """缓存真实搜索结果；调用方负责排除 Mock。"""
+
         self._set("search", f"{provider}|{limit}|{query}", [asdict(item) for item in results])
 
     def get_source(self, url: str) -> Source | None:
+        """读取 URL 对应的正文缓存。"""
+
         data = self._get("pages", url)
         if data is None:
             return None
@@ -50,11 +58,15 @@ class ResearchCache:
             return None
 
     def set_source(self, source: Source) -> None:
+        """只缓存抓取成功的真实来源。"""
+
         # 失败结果和 Mock 内容不缓存，避免长期复用临时错误或演示数据。
         if source.fetched and source.provider != "mock":
             self._set("pages", source.url, asdict(source))
 
     def clear(self) -> int:
+        """清空搜索与正文命名空间并返回删除条目数。"""
+
         removed = 0
         for namespace in ("search", "pages"):
             folder = self.directory / namespace

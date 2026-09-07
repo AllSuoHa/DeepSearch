@@ -53,32 +53,44 @@ class Planner(Protocol):
 
 
 class Ranker(Protocol):
+    """对候选和完整来源进行相关性、质量与多样性排序。"""
+
     def rank(self, results: list[SearchResult], question: str, subquestions: list[str], limit: int | None = None) -> list[SearchResult]: ...
 
     def score_source(self, source: Source, question: str) -> None: ...
 
 
 class Verifier(Protocol):
+    """把来源组织为可引用证据组并暴露冲突。"""
+
     def organize(self, sources: list[Source]) -> tuple[list[EvidenceGroup], list[str]]: ...
 
 
 class Validator(Protocol):
+    """在落盘前执行确定性报告检查与单次修复。"""
+
     def validate(self, report: str, sources: list[Source], plan: SearchPlan) -> ValidationResult: ...
 
     def repair(self, report: str, sources: list[Source], plan: SearchPlan) -> str: ...
 
 
 class Reporter(Protocol):
+    """根据计划和证据生成结论优先报告。"""
+
     def generate(self, plan: SearchPlan, sources: list[Source], evidence: list[EvidenceGroup], conflicts: list[str], rounds: int, trace: list[RoundTrace] | None = None) -> str: ...
 
 
 class ReportStorage(Protocol):
+    """保存已通过质量门的报告并列出历史资产。"""
+
     def save(self, question: str, report: str, output_format: str = "markdown") -> Path: ...
 
     def list(self, query: str = "") -> list[Path]: ...
 
 
 class CacheStats(Protocol):
+    """当前进程可观测的缓存命中统计。"""
+
     hits: int
     misses: int
 

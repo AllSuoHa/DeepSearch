@@ -71,6 +71,8 @@ class SourceRanker:
 
     @staticmethod
     def domain(url: str) -> str:
+        """提取统一域名键，Mock 链接使用其虚拟主机名。"""
+
         if url.startswith("mock://"):
             return urlsplit(url).netloc or "mock"
         return urlsplit(url).netloc.lower().removeprefix("www.")

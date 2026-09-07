@@ -21,6 +21,33 @@ class QuestionType(str, Enum):
     RESEARCH = "deep_research"
 
 
+class WorkMode(str, Enum):
+    """用户选择的工作模式；AUTO 只决定走搜索还是研究。"""
+
+    AUTO = "auto"
+    SEARCH = "search"
+    RESEARCH = "research"
+
+
+class ResourceType(str, Enum):
+    """搜索结果展示分组；值直接作为简体中文界面标签。"""
+
+    WEB = "网页"
+    OFFICIAL = "官方信息"
+    WATCH = "播放平台"
+    COMMUNITY = "社区与聚合"
+    ACADEMIC = "学术文献"
+
+
+class RiskLevel(str, Enum):
+    """链接访问风险，不等同于对页面内容真实性的事实背书。"""
+
+    TRUSTED = "可信来源"
+    NORMAL = "普通网页"
+    UNVERIFIED = "未验证"
+    CAUTION = "谨慎访问"
+
+
 class Confidence(str, Enum):
     """证据组的可读可信度标签。"""
 
@@ -41,7 +68,7 @@ class ReportSpecification:
     target_words: int = 1200
     audience: str = "通用读者"
     language: str = "中文"
-    sections: tuple[str, ...] = ("摘要", "关键结论", "详细分析", "建议与下一步", "证据局限与争议")
+    sections: tuple[str, ...] = ("结论", "关键发现", "分析", "局限", "参考来源")
     custom_instructions: str = ""
 
 
@@ -79,6 +106,12 @@ class SearchResult:
     query: str = ""
     provider: str = ""
     rank_score: float = 0.0
+    resource_type: str = ResourceType.WEB.value
+    risk_level: str = RiskLevel.UNVERIFIED.value
+    risk_reasons: tuple[str, ...] = ()
+    published_at: str = ""
+    authors: tuple[str, ...] = ()
+    doi: str = ""
 
 
 @dataclass(slots=True)
@@ -96,6 +129,12 @@ class Source:
     source_id: int = 0
     relevance_score: float = 0.0
     quality_score: float = 0.0
+    resource_type: str = ResourceType.WEB.value
+    risk_level: str = RiskLevel.UNVERIFIED.value
+    risk_reasons: tuple[str, ...] = ()
+    published_at: str = ""
+    authors: tuple[str, ...] = ()
+    doi: str = ""
 
     @property
     def usable_text(self) -> str:
@@ -106,6 +145,8 @@ class Source:
 
 @dataclass(slots=True)
 class EvidenceGroup:
+    """一条归纳主张及支持它的来源编号和保守可信度。"""
+
     statement: str
     source_ids: list[int]
     confidence: Confidence
@@ -123,6 +164,8 @@ class SufficiencyDecision:
 
 @dataclass(slots=True)
 class ValidationResult:
+    """确定性质量门的结果；issues 可直接驱动唯一一次修订。"""
+
     valid: bool
     issues: list[str] = field(default_factory=list)
 
@@ -168,6 +211,8 @@ class ResearchPolicy:
 
 @dataclass(frozen=True, slots=True)
 class QualityDimension:
+    """一个可解释的 0–100 工程质量维度。"""
+
     name: str
     score: int
     explanation: str
@@ -198,3 +243,56 @@ class ResearchResult:
     trace: list[RoundTrace] = field(default_factory=list)
     metrics: ResearchMetrics = field(default_factory=ResearchMetrics)
     scorecard: ResearchScorecard = field(default_factory=ResearchScorecard)
+    direct_answer: str = ""
+    review_summary: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRequest:
+    """统一运行入口的请求对象。"""
+
+    question: str
+    mode: WorkMode = WorkMode.AUTO
+    brief: ResearchBrief = field(default_factory=ResearchBrief)
+    locale: str = "zh-CN"
+    region: str = "CN"
+    conversation_id: str = ""
+
+
+@dataclass(slots=True)
+class SearchResponse:
+    """搜索模式交付：直接链接优先，不伪装成研究报告。"""
+
+    query: str
+    answer: str
+    items: list[SearchResult]
+    queries: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    elapsed_seconds: float = 0.0
+    artifact_path: Path | None = None
+
+
+@dataclass(slots=True)
+class AgentRunResult:
+    """统一入口的互斥结果：一次运行只包含搜索或研究其中一种。"""
+
+    requested_mode: WorkMode
+    resolved_mode: WorkMode
+    search: SearchResponse | None = None
+    research: ResearchResult | None = None
+
+    @property
+    def content(self) -> str:
+        """返回适合对话列表显示的主要文本。"""
+
+        if self.search is not None:
+            return self.search.answer
+        return self.research.report if self.research is not None else ""
+
+    @property
+    def artifact_path(self) -> Path | None:
+        """返回本次搜索快照或研究报告的本地文件路径。"""
+
+        if self.search is not None:
+            return self.search.artifact_path
+        return self.research.report_path if self.research is not None else None

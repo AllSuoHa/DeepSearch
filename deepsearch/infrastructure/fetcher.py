@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import io
 import logging
 import re
 import urllib.request
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 class _TextExtractor(HTMLParser):
     """标准库 HTML 文本抽取器，跳过脚本、样式和导航等低价值区域。"""
 
-    ignored = {"script", "style", "noscript", "svg", "nav", "footer", "form"}
+    ignored = {"script", "style", "noscript", "svg", "nav", "footer", "form", "header", "aside", "button"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -64,6 +65,12 @@ class WebFetcher:
                     sources[index] = Source(
                         result.title, result.url, "", result.snippet, result.query,
                         result.provider, False, str(exc),
+                        resource_type=result.resource_type,
+                        risk_level=result.risk_level,
+                        risk_reasons=result.risk_reasons,
+                        published_at=result.published_at,
+                        authors=result.authors,
+                        doi=result.doi,
                     )
         return [source for source in sources if source is not None]
 
@@ -75,6 +82,12 @@ class WebFetcher:
                 result.title, result.url,
                 f"{result.snippet} 此内容由离线 Mock 搜索源提供，用于验证完整工作流；真实研究请切换在线模式。",
                 result.snippet, result.query, result.provider, True,
+                resource_type=result.resource_type,
+                risk_level=result.risk_level,
+                risk_reasons=result.risk_reasons,
+                published_at=result.published_at,
+                authors=result.authors,
+                doi=result.doi,
             )
         request = urllib.request.Request(
             result.url,
@@ -86,25 +99,68 @@ class WebFetcher:
                 # 限制响应体大小，避免异常大页面占用过多内存。
                 raw = response.read(2_000_000)
                 charset = response.headers.get_content_charset() or "utf-8"
-            if content_type not in {"text/html", "text/plain", "application/xhtml+xml"}:
+            if content_type == "application/pdf" or result.url.lower().split("?", 1)[0].endswith(".pdf"):
+                text = self._extract_pdf(raw)
+            elif content_type not in {"text/html", "text/plain", "application/xhtml+xml"}:
                 raise ValueError(f"不支持的内容类型: {content_type}")
-            decoded = raw.decode(charset, errors="replace")
-            text = decoded if content_type == "text/plain" else self._extract(decoded)
+            else:
+                decoded = raw.decode(charset, errors="replace")
+                text = decoded if content_type == "text/plain" else self._extract(decoded)
             text = self._sanitize(text)
             if len(text) < 120:
                 raise ValueError("正文过短或网页阻止抓取")
-            return Source(result.title, result.url, text[: self.max_chars], result.snippet, result.query, result.provider, True)
+            return Source(
+                result.title, result.url, text[: self.max_chars], result.snippet, result.query,
+                result.provider, True, resource_type=result.resource_type,
+                risk_level=result.risk_level, risk_reasons=result.risk_reasons,
+                published_at=result.published_at, authors=result.authors, doi=result.doi,
+            )
         except Exception as exc:
             logger.warning("抓取失败 url=%s error=%s", result.url, exc)
-            return Source(result.title, result.url, "", result.snippet, result.query, result.provider, False, str(exc))
+            return Source(
+                result.title, result.url, "", result.snippet, result.query, result.provider, False, str(exc),
+                resource_type=result.resource_type, risk_level=result.risk_level,
+                risk_reasons=result.risk_reasons, published_at=result.published_at,
+                authors=result.authors, doi=result.doi,
+            )
 
     @staticmethod
     def _extract(document: str) -> str:
         """从 HTML 中提取可读文本并合并多余空白。"""
 
+        try:
+            import trafilatura
+
+            extracted = trafilatura.extract(
+                document,
+                include_comments=False,
+                include_tables=True,
+                favor_precision=True,
+            )
+            if extracted and len(extracted.strip()) >= 120:
+                return re.sub(r"\s+", " ", extracted).strip()
+        except Exception:
+            # 第三方正文抽取不可用时保留标准库下限。
+            pass
         parser = _TextExtractor()
         parser.feed(document)
         return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
+
+    @staticmethod
+    def _extract_pdf(raw: bytes) -> str:
+        """读取公开可访问 PDF；不尝试解密或绕过访问控制。"""
+
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise ValueError("PDF 正文读取需要安装 pypdf") from exc
+        reader = PdfReader(io.BytesIO(raw))
+        if reader.is_encrypted:
+            raise ValueError("不读取加密 PDF")
+        parts = []
+        for page in reader.pages[:80]:
+            parts.append(page.extract_text() or "")
+        return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
     @staticmethod
     def _sanitize(text: str) -> str:

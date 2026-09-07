@@ -1,3 +1,5 @@
+"""命令行入口：复用统一 Agent、自动任务与投递服务，不复制业务逻辑。"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,10 +12,12 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from ..bootstrap import DeepSearchAgent, apply_profile
-from ..domain.models import ReportSpecification, ResearchBrief
+from ..application.errors import DeepSearchError
+from ..application.search_service import search_response_markdown
+from ..domain.models import AgentRequest, ReportSpecification, ResearchBrief, WorkMode
 from ..infrastructure.config import load_settings
 from ..infrastructure.customer_service import CustomerServicePublisher
-from ..infrastructure.storage import FileReportStorage
+from ..infrastructure.storage import FileArtifactStorage, FileReportStorage
 from ..scheduling.topics import ResearchTaskManager, ResearchTaskScheduler, ScheduledResearchTask
 
 # cli.py 位于 deepsearch/presentation/；仓库级入口和资源位于其上两级。
@@ -22,21 +26,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="deepsearch", description="迭代式 AI 深度搜索引擎")
+    """声明稳定 CLI 合同；旧 topics 命令继续作为 tasks 的兼容别名。"""
+
+    parser = argparse.ArgumentParser(prog="deepsearch", description="个人 AI 搜索与研究助手")
     parser.add_argument("--config", default=None, help="配置文件路径（默认 ./config.json）")
     parser.add_argument("--mock", action="store_true", help="完全离线的确定性演示模式")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask = subparsers.add_parser("ask", help="执行一次研究")
-    ask.add_argument("question", help="要研究的问题")
-    ask.add_argument("--no-stream", action="store_true", help="不在终端显示完整报告")
+    ask = subparsers.add_parser("ask", help="执行一次搜索或研究")
+    ask.add_argument("question", help="要搜索或研究的问题")
+    ask.add_argument("--mode", choices=["auto", "search", "research"], default="research", help="工作模式；默认 research 以兼容旧版 CLI")
+    # 保留旧参数名兼容已有脚本；当前实现是在报告校验后一次性打印，不是模型 token 流。
+    ask.add_argument("--no-stream", action="store_true", help="不在终端打印完整结果")
 
     subparsers.add_parser("interactive", help="进入支持追问的交互模式")
     history = subparsers.add_parser("history", help="列出历史报告")
     history.add_argument("--query", default="", help="按主题或正文搜索")
 
-    # tasks 是 2.1 的正式入口；topics 保留为兼容别名。
-    for command_name, command_help in (("tasks", "管理自主研究任务"), ("topics", "兼容旧版主题命令")):
+    # tasks 是正式入口；topics 保留为兼容别名。
+    for command_name, command_help in (("tasks", "管理自动任务"), ("topics", "兼容旧版主题命令")):
         tasks = subparsers.add_parser(command_name, help=command_help)
         task_sub = tasks.add_subparsers(dest="task_command", required=True)
         task_sub.add_parser("list", help="列出任务")
@@ -53,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         add.add_argument("--format", choices=["markdown", "text", "json"], default="markdown")
         add.add_argument("--words", type=int, default=1200)
         add.add_argument("--audience", default="通用读者")
-        add.add_argument("--sections", default="摘要,关键结论,详细分析,建议与下一步,证据局限与争议")
+        add.add_argument("--sections", default="结论,关键发现,分析,局限,参考来源")
         add.add_argument("--instructions", default="")
         add.add_argument("--profile", choices=["快速", "均衡", "深度"], default="深度")
         add.add_argument(
@@ -79,12 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_sub.add_parser("list", help="列出待投递报告")
     retry_delivery = delivery_sub.add_parser("retry", help="立即重试到期报告")
     retry_delivery.add_argument("--force", action="store_true", help="也重试 4xx 等不可自动重试记录")
-    web = subparsers.add_parser("web", help="启动 Streamlit 研究工作台")
+    web = subparsers.add_parser("web", help="启动 Streamlit 个人 AI 工作台")
     web.add_argument("--port", type=int, default=8501, help="Web 服务端口")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """解析命令并返回进程退出码，预期业务错误不会打印调用栈。"""
+
     args = build_parser().parse_args(argv)
     settings = load_settings(args.config, mode="mock" if args.mock else None)
     _configure_logging(settings.config_path.parent, settings.log_level)
@@ -93,9 +103,19 @@ def main(argv: list[str] | None = None) -> int:
     agent = DeepSearchAgent(settings)
     try:
         if args.command == "ask":
-            result = agent.research(args.question, _progress)
+            run = agent.run(AgentRequest(args.question, WorkMode(args.mode)), _progress)
+            if run.search is not None:
+                content = search_response_markdown(run.search)
+                path = FileArtifactStorage(settings.conversation_dir.parent / "artifacts").save_search(run.search)
+                if not args.no_stream:
+                    _print_markdown(content)
+                print(f"搜索快照已保存：{path}")
+                return 0
+            result = run.research
+            if result is None:
+                raise DeepSearchError("运行没有返回结果")
             if not args.no_stream:
-                _stream_markdown(result.report)
+                _print_markdown(result.report)
             return 0 if result.validation.valid else 2
         if args.command == "interactive":
             return _interactive(agent)
@@ -112,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.once:
                 completed = scheduler.run_due(progress=_progress)
-                print("已运行：" + "、".join(completed) if completed else "当前没有到期研究任务。")
+                print("已运行：" + "、".join(completed) if completed else "当前没有到期自动任务。")
             else:
                 print(f"定时器已启动，每 {max(5, args.poll)} 秒检查一次。按 Ctrl+C 停止。", flush=True)
                 scheduler.serve(args.poll, _progress)
@@ -122,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n已停止。")
         return 130
-    except (ValueError, OSError) as exc:
+    except (DeepSearchError, ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
     return 0
@@ -140,7 +160,7 @@ def _run_web(port: int) -> int:
 
 
 def _interactive(agent: DeepSearchAgent) -> int:
-    print("DeepSearch 交互模式。输入问题开始；输入 /quit 退出。", flush=True)
+    print("DeepSearch 研究追问模式。输入问题开始；输入 /quit 退出。", flush=True)
     previous = None
     while True:
         try:
@@ -152,17 +172,17 @@ def _interactive(agent: DeepSearchAgent) -> int:
         if not question:
             continue
         previous = agent.research(question, _progress) if previous is None else agent.follow_up(previous, question, _progress)
-        _stream_markdown(previous.report)
+        _print_markdown(previous.report)
 
 
 def _tasks(args, settings) -> int:
-    """管理带周期、领域、来源类型和报告规格的自主研究任务。"""
+    """管理带周期、领域、来源类型和报告规格的自动任务。"""
 
     manager = ResearchTaskManager(settings)
     if args.task_command == "list":
         tasks = manager.list()
         if not tasks:
-            print("尚未配置自主研究任务。")
+            print("尚未配置自动任务。")
         for task in tasks:
             report = task.brief.report
             print(
@@ -198,7 +218,7 @@ def _tasks(args, settings) -> int:
             brief=brief,
         )
         manager.add_task(task)
-        print(f"自主研究任务“{args.name}”已保存。")
+        print(f"自动任务“{args.name}”已保存。")
     elif args.task_command == "remove":
         print(f"任务“{args.name}”已删除。" if manager.remove(args.name) else "未找到该任务。")
     elif args.task_command in {"enable", "disable"}:
@@ -210,12 +230,12 @@ def _tasks(args, settings) -> int:
             agent_factory=lambda profile: DeepSearchAgent(apply_profile(settings, profile)),
         )
         result = scheduler.run_now(args.name, _progress)
-        _stream_markdown(result.report)
+        _print_markdown(result.report)
     return 0
 
 
 def _progress(phase: str, message: str) -> None:
-    labels = {"plan": "PLAN", "search": "SEARCH", "fetch": "FETCH", "evaluate": "CHECK", "adjust": "RETRY", "verify": "VERIFY", "generate": "WRITE", "validate": "VALIDATE", "score": "SCORE", "saved": "SAVED", "deliver": "DELIVER", "follow_up": "FOLLOW-UP"}
+    labels = {"route": "MODE", "plan": "PLAN", "search": "SEARCH", "fetch": "FETCH", "evaluate": "CHECK", "adjust": "RETRY", "verify": "VERIFY", "evidence_map": "SYNTHESIZE", "draft": "DRAFT", "review": "REVIEW", "generate": "WRITE", "validate": "VALIDATE", "score": "SCORE", "saved": "SAVED", "deliver": "DELIVER", "follow_up": "FOLLOW-UP"}
     print(f"[{labels.get(phase, 'INFO')}] {message}", flush=True)
 
 
@@ -250,7 +270,9 @@ def _delivery(args, settings) -> int:
     return 0 if queued == 0 else 2
 
 
-def _stream_markdown(report: str) -> None:
+def _print_markdown(report: str) -> None:
+    """打印已经完整生成并通过质量门的 Markdown；这里不模拟 token 流。"""
+
     print("\n" + "=" * 72)
     for paragraph in report.splitlines(keepends=True):
         print(paragraph, end="", flush=True)

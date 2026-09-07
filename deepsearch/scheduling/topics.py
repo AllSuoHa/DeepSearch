@@ -1,4 +1,4 @@
-"""可持久化的自主研究任务及轻量调度器。"""
+"""可持久化的个人自动任务及轻量本地调度器。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ DATA_CLASSIFICATIONS = {"public", "internal", "confidential"}
 
 @dataclass(frozen=True, slots=True)
 class ScheduledResearchTask:
-    """一项自主研究任务：何时研究、研究什么，以及如何交付。"""
+    """一项自动研究任务：何时运行、研究什么，以及如何交付。"""
 
     name: str
     question: str
@@ -94,6 +94,8 @@ class ScheduledResearchTask:
         )
 
     def to_dict(self) -> dict:
+        """序列化为不含凭据、可写入普通配置文件的字典。"""
+
         return {
             "schema_version": 2,
             "name": self.name,
@@ -130,6 +132,8 @@ class ScheduledResearchTask:
         return current.strftime("%Y-%m-%d")
 
     def is_due(self, current: datetime, last_occurrence: str = "") -> bool:
+        """判断任务在当前时间是否到期且尚未成功执行。"""
+
         if not self.enabled or current.strftime("%H:%M") < self.run_time:
             return False
         if self.schedule_type == "weekly" and current.weekday() not in self.weekdays:
@@ -146,6 +150,8 @@ class ResearchTaskManager:
         self.settings = settings
 
     def list(self) -> list[ScheduledResearchTask]:
+        """读取所有有效任务；单条损坏配置不会阻断其余任务。"""
+
         tasks = []
         for raw in self.settings.topics:
             try:
@@ -155,6 +161,8 @@ class ResearchTaskManager:
         return tasks
 
     def add_task(self, task: ScheduledResearchTask) -> None:
+        """按名称新增或替换任务并立即持久化。"""
+
         tasks = [item for item in self.list() if item.name != task.name]
         tasks.append(task)
         self._save(tasks)
@@ -166,6 +174,8 @@ class ResearchTaskManager:
         self.add_task(task)
 
     def remove(self, name: str, save: bool = True) -> bool:
+        """删除指定任务；返回任务是否存在。"""
+
         tasks = self.list()
         remaining = [task for task in tasks if task.name != name]
         changed = len(remaining) != len(tasks)
@@ -174,9 +184,13 @@ class ResearchTaskManager:
         return changed
 
     def get(self, name: str) -> ScheduledResearchTask | None:
+        """按名称查找任务。"""
+
         return next((task for task in self.list() if task.name == name), None)
 
     def set_enabled(self, name: str, enabled: bool) -> bool:
+        """启用或停用任务，并保持其他字段不变。"""
+
         tasks = self.list()
         changed = False
         updated = []
@@ -213,6 +227,8 @@ class ResearchTaskScheduler:
         self.state_path = state_path or settings.config_path.parent / ".deepsearch-schedule-state.json"
 
     def run_due(self, now: datetime | None = None, progress=None) -> list[str]:
+        """执行所有到期任务，并只记录真正成功的计划实例。"""
+
         self._flush_pending()
         current = now or datetime.now().astimezone()
         state = self._load_state()
@@ -223,8 +239,8 @@ class ResearchTaskScheduler:
             try:
                 self._run_task(task, progress)
             except Exception as exc:
-                # 一个任务失败不阻止同一批次中的其他自主任务。
-                logger.exception("自主研究任务失败 name=%s error=%s", task.name, exc)
+                # 一个任务失败不阻止同一批次中的其他自动任务。
+                logger.exception("自动任务失败 name=%s error=%s", task.name, exc)
                 continue
             state[task.name] = task.occurrence_key(current)
             completed.append(task.name)
@@ -232,6 +248,8 @@ class ResearchTaskScheduler:
         return completed
 
     def run_now(self, name: str, progress=None) -> ResearchResult:
+        """忽略计划时间立即运行一个已保存任务。"""
+
         self._flush_pending()
         task = ResearchTaskManager(self.settings).get(name)
         if task is None:
@@ -239,6 +257,8 @@ class ResearchTaskScheduler:
         return self._run_task(task, progress)
 
     def serve(self, poll_seconds: int = 30, progress=None) -> None:
+        """以前台循环运行轻量调度器，进程退出后即停止。"""
+
         while True:
             self.run_due(progress=progress)
             time.sleep(max(5, poll_seconds))
@@ -261,9 +281,15 @@ class ResearchTaskScheduler:
             else:
                 if progress is not None:
                     if outcome.status == "indexed":
-                        progress("deliver", "报告已自动写入 CustomerService 知识库")
+                        progress(
+                            "deliver",
+                            f"报告已自动写入 CustomerService 知识库（文档 {outcome.document_id}）",
+                        )
                     else:
-                        progress("deliver", "CustomerService 暂不可用，报告已进入安全重试队列")
+                        progress(
+                            "deliver",
+                            f"CustomerService 未完成入库，报告已进入安全重试队列：{outcome.error}",
+                        )
         return result
 
     def _flush_pending(self) -> None:

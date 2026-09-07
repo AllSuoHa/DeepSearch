@@ -1,49 +1,76 @@
 [theme]
-base = "light"
-primaryColor = "#4F46E5"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F8FAFC"
-codeBackgroundColor = "#F2F4F7"
-textColor = "#172033"
-linkColor = "#4338CA"
-borderColor = "#E4E7EC"
 showWidgetBorder = true
 showSidebarBorder = true
-baseRadius = "10px"
+baseRadius = "12px"
 buttonRadius = "10px"
-font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 codeFontSize = "0.85rem"
-codeTextColor = "#344054"
-baseFontSize = 14
+baseFontSize = 15
 baseFontWeight = 400
-headingFontSizes = ["38px", "28px", "21px", "17px", "14px", "12px"]
+headingFontSizes = ["34px", "26px", "20px", "17px", "14px", "12px"]
 headingFontWeights = [650, 600, 600, 600, 600, 600]
 linkUnderline = false
-chartCategoricalColors = ["#4F46E5", "#0EA5E9", "#16A34A", "#D97706", "#DC2626", "#7C3AED", "#64748B"]
-grayColor = "#667085"
-blueColor = "#2563EB"
-greenColor = "#16A34A"
-redColor = "#DC2626"
-yellowColor = "#CA8A04"
-orangeColor = "#EA580C"
-violetColor = "#7C3AED"
-dataframeBorderColor = "#E4E7EC"
-dataframeHeaderBackgroundColor = "#F8FAFC"
 
-[theme.sidebar]
-backgroundColor = "#F8FAFC"
-secondaryBackgroundColor = "#F2F4F7"
-codeBackgroundColor = "#EAECF0"
-textColor = "#172033"
-borderColor = "#E4E7EC"
-primaryColor = "#4F46E5"
-dataframeHeaderBackgroundColor = "#F2F4F7"
-dataframeBorderColor = "#E4E7EC"
+[theme.light]
+primaryColor = "#0F766E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F7F8"
+codeBackgroundColor = "#F3F4F6"
+textColor = "#202123"
+linkColor = "#0F766E"
+borderColor = "#E5E7EB"
+grayColor = "#6B7280"
+blueColor = "#2563EB"
+greenColor = "#15803D"
+redColor = "#DC2626"
+yellowColor = "#A16207"
+orangeColor = "#C2410C"
+violetColor = "#7C3AED"
+dataframeBorderColor = "#E5E7EB"
+dataframeHeaderBackgroundColor = "#F7F7F8"
+
+[theme.dark]
+primaryColor = "#2DD4BF"
+backgroundColor = "#212121"
+secondaryBackgroundColor = "#2F2F2F"
+codeBackgroundColor = "#303030"
+textColor = "#ECECEC"
+linkColor = "#5EEAD4"
+borderColor = "#424242"
+grayColor = "#A3A3A3"
+blueColor = "#60A5FA"
+greenColor = "#4ADE80"
+redColor = "#F87171"
+yellowColor = "#FACC15"
+orangeColor = "#FB923C"
+violetColor = "#A78BFA"
+dataframeBorderColor = "#424242"
+dataframeHeaderBackgroundColor = "#2F2F2F"
+
+[theme.light.sidebar]
+backgroundColor = "#F7F7F8"
+secondaryBackgroundColor = "#ECECEE"
+codeBackgroundColor = "#ECECEE"
+textColor = "#202123"
+borderColor = "#E5E7EB"
+primaryColor = "#0F766E"
+
+[theme.dark.sidebar]
+backgroundColor = "#171717"
+secondaryBackgroundColor = "#262626"
+codeBackgroundColor = "#262626"
+textColor = "#ECECEC"
+borderColor = "#343434"
+primaryColor = "#2DD4BF"
 
 [server]
 headless = true
 runOnSave = true
+
+[client]
+# 个人工作台不需要开发者工具栏、Deploy 按钮和右上角菜单。
+toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false

@@ -1,6 +1,9 @@
 {
   "mode": "auto",
+  "runtime_mode": "online",
+  "default_work_mode": "auto",
   "search_provider": "duckduckgo",
+  "search_provider_order": ["brave", "duckduckgo", "wikipedia"],
   "max_rounds": 3,
   "results_per_query": 4,
   "max_sources": 16,
@@ -8,6 +11,7 @@
   "fetch_workers": 8,
   "reports_dir": "reports",
   "cache_dir": ".cache/deepsearch",
+  "conversation_dir": "data/conversations",
   "cache_ttl_seconds": 21600,
   "cache_enabled": true,
   "per_domain_limit": 2,
@@ -15,6 +19,7 @@
   "llm": {
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
+    "request_timeout": 180.0,
     "api_key": ""
   },
   "customer_service": {
@@ -50,7 +55,7 @@
           "target_words": 1800,
           "audience": "技术负责人",
           "language": "中文",
-          "sections": ["摘要", "重大事件", "技术进展", "行业影响", "建议与下一步"],
+          "sections": ["结论", "重大事件", "技术进展", "行业影响", "局限", "参考来源"],
           "custom_instructions": "按重要性排序，区分已确认事实和分析判断"
         }
       }

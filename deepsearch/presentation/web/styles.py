@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# 产品标志、折叠侧栏图标和助手头像共用一个 Material Symbol，避免
+# 同一页面同时出现放大镜、方框 Logo 与机器人三套视觉语言。
+ASSISTANT_ICON = ":material/travel_explore:"
 
 
 def inject_app_css() -> None:
@@ -20,10 +24,42 @@ def inject_app_css() -> None:
     st.html(f"<style>{css}</style>")
 
 
+def inject_shortcut_tooltips(shortcuts: list[dict[str, str]], suppressed_id: str = "") -> None:
+    """为快捷输入生成仅悬浮可见的说明，避免原生 help 在点击后残留。"""
+
+    rules = []
+    for shortcut in shortcuts:
+        shortcut_id = str(shortcut.get("id", ""))
+        if not re.fullmatch(r"[a-z0-9-]+", shortcut_id):
+            continue
+        prompt = _css_content(str(shortcut.get("prompt", "")))
+        rules.append(f'.st-key-shortcut-{shortcut_id}::after {{ content: {prompt}; }}')
+    if re.fullmatch(r"[a-z0-9-]+", suppressed_id or ""):
+        # 点击后的这一次 rerun 禁用对应提示；下一次普通 rerun 自动恢复。
+        rules.append(
+            f'.st-key-shortcut-{suppressed_id}:hover::after {{ opacity: 0; visibility: hidden; }}'
+        )
+    if rules:
+        st.html("<style>" + "\n".join(rules) + "</style>")
+
+
+def _css_content(value: str) -> str:
+    """把用户提示安全编码为 CSS content 字符串，防止闭合 style 标签。"""
+
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("<", "\\3C ")
+        .replace(">", "\\3E ")
+        .replace("\r", " ")
+        .replace("\n", "\\A ")
+    )
+    return f'"{escaped}"'
+
+
 def render_page_header(kicker: str, title: str, subtitle: str) -> None:
     """渲染全站一致的页面眉题、主标题和说明文字。"""
 
-    st.markdown(f"**:violet[{kicker}]**")
     st.title(title)
     st.caption(subtitle)
     st.space("small")

@@ -14,9 +14,16 @@ _CONFIG_LOCK = threading.Lock()
 
 @dataclass(slots=True)
 class LLMSettings:
+    """OpenAI 兼容模型连接参数。
+
+    ``request_timeout`` 约束单次阶段调用，而不是整份研究的总时长；
+    正常在线研究会连续调用证据整理、初稿和独立审校三个阶段。
+    """
+
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     api_key: str = ""
+    request_timeout: float = 180.0
 
 
 @dataclass(slots=True)
@@ -37,8 +44,13 @@ class CustomerServiceSettings:
 class Settings:
     """项目完整运行配置；路径会相对于配置文件位置解析。"""
 
+    # ``mode`` 是 2.1 兼容别名；新代码使用 runtime_mode，避免与工作模式混淆。
     mode: str = "auto"
+    runtime_mode: str = ""
+    default_work_mode: str = "auto"
     search_provider: str = "duckduckgo"
+    search_provider_order: tuple[str, ...] = ("brave", "duckduckgo", "wikipedia")
+    brave_api_key: str = ""
     max_rounds: int = 3
     results_per_query: int = 4
     max_sources: int = 16
@@ -46,6 +58,7 @@ class Settings:
     fetch_workers: int = 8
     reports_dir: Path = Path("reports")
     cache_dir: Path = Path(".cache/deepsearch")
+    conversation_dir: Path = Path("data/conversations")
     cache_ttl_seconds: int = 21_600
     cache_enabled: bool = True
     per_domain_limit: int = 2
@@ -55,6 +68,15 @@ class Settings:
     customer_service: CustomerServiceSettings = field(default_factory=CustomerServiceSettings)
     topics: list[dict[str, Any]] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if not self.runtime_mode:
+            self.runtime_mode = "mock" if self.mode == "mock" else "online"
+        if self.runtime_mode not in {"online", "mock"}:
+            raise ValueError("runtime_mode 必须是 online 或 mock")
+        if self.default_work_mode not in {"auto", "search", "research"}:
+            raise ValueError("default_work_mode 必须是 auto、search 或 research")
+        self.mode = "mock" if self.runtime_mode == "mock" else "auto"
+
     @property
     def research_tasks(self) -> list[dict[str, Any]]:
         """2.1 名称；底层继续复用 topics 字段以兼容旧调用者。"""
@@ -63,11 +85,15 @@ class Settings:
 
     @property
     def mock_search(self) -> bool:
-        return self.mode == "mock" or self.search_provider == "mock"
+        """只有显式演示模式才允许创建或接受 Mock 搜索结果。"""
+
+        return self.runtime_mode == "mock"
 
     @property
     def mock_llm(self) -> bool:
-        return self.mode == "mock" or not self.llm.api_key
+        """判断当前是否只能使用确定性演示报告器。"""
+
+        return self.runtime_mode == "mock" or not self.llm.api_key
 
 
 def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
@@ -85,6 +111,15 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         base_url=os.getenv("DEEPSEARCH_BASE_URL", llm_raw.get("base_url", llm_defaults.base_url)),
         model=os.getenv("DEEPSEARCH_MODEL", llm_raw.get("model", llm_defaults.model)),
         api_key=os.getenv("DEEPSEARCH_API_KEY", llm_raw.get("api_key", "")),
+        request_timeout=max(
+            10.0,
+            float(
+                os.getenv(
+                    "DEEPSEARCH_LLM_TIMEOUT",
+                    llm_raw.get("request_timeout", llm_defaults.request_timeout),
+                )
+            ),
+        ),
     )
     reports_value = raw.get("reports_dir", "reports")
     reports_dir = Path(reports_value)
@@ -93,6 +128,9 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
     cache_dir = Path(raw.get("cache_dir", ".cache/deepsearch"))
     if not cache_dir.is_absolute():
         cache_dir = config_path.parent / cache_dir
+    conversation_dir = Path(raw.get("conversation_dir", "data/conversations"))
+    if not conversation_dir.is_absolute():
+        conversation_dir = config_path.parent / conversation_dir
     customer_service_raw = raw.get("customer_service", {})
     customer_service_defaults = CustomerServiceSettings()
     outbox_dir = Path(customer_service_raw.get("outbox_dir", customer_service_defaults.outbox_dir))
@@ -129,8 +167,15 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
     )
 
     settings = Settings(
-        mode=os.getenv("DEEPSEARCH_MODE", raw.get("mode", "auto")),
+        mode=str(raw.get("mode", "auto")),
+        runtime_mode=os.getenv(
+            "DEEPSEARCH_RUNTIME_MODE",
+            str(raw.get("runtime_mode", "mock" if os.getenv("DEEPSEARCH_MODE", raw.get("mode")) == "mock" else "online")),
+        ),
+        default_work_mode=str(raw.get("default_work_mode", "auto")),
         search_provider=raw.get("search_provider", "duckduckgo"),
+        search_provider_order=tuple(raw.get("search_provider_order", ("brave", "duckduckgo", "wikipedia"))),
+        brave_api_key=os.getenv("DEEPSEARCH_BRAVE_API_KEY", ""),
         max_rounds=int(raw.get("max_rounds", 3)),
         results_per_query=int(raw.get("results_per_query", 4)),
         max_sources=int(raw.get("max_sources", 16)),
@@ -138,6 +183,7 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         fetch_workers=int(raw.get("fetch_workers", 8)),
         reports_dir=reports_dir,
         cache_dir=cache_dir,
+        conversation_dir=conversation_dir,
         cache_ttl_seconds=int(raw.get("cache_ttl_seconds", 21_600)),
         cache_enabled=bool(raw.get("cache_enabled", True)),
         per_domain_limit=int(raw.get("per_domain_limit", 2)),
@@ -149,6 +195,8 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
     )
     # 忽略未知覆盖项，避免调用者拼写错误破坏 dataclass 构造。
     valid = {key: value for key, value in overrides.items() if hasattr(settings, key) and value is not None}
+    if "mode" in valid and "runtime_mode" not in valid:
+        valid["runtime_mode"] = "mock" if valid["mode"] == "mock" else "online"
     return replace(settings, **valid)
 
 
@@ -157,7 +205,10 @@ def save_settings(settings: Settings) -> None:
 
     data = {
         "mode": settings.mode,
+        "runtime_mode": settings.runtime_mode,
+        "default_work_mode": settings.default_work_mode,
         "search_provider": settings.search_provider,
+        "search_provider_order": list(settings.search_provider_order),
         "max_rounds": settings.max_rounds,
         "results_per_query": settings.results_per_query,
         "max_sources": settings.max_sources,
@@ -165,6 +216,7 @@ def save_settings(settings: Settings) -> None:
         "fetch_workers": settings.fetch_workers,
         "reports_dir": str(settings.reports_dir),
         "cache_dir": str(settings.cache_dir),
+        "conversation_dir": str(settings.conversation_dir),
         "cache_ttl_seconds": settings.cache_ttl_seconds,
         "cache_enabled": settings.cache_enabled,
         "per_domain_limit": settings.per_domain_limit,
@@ -172,6 +224,7 @@ def save_settings(settings: Settings) -> None:
         "llm": {
             "base_url": settings.llm.base_url,
             "model": settings.llm.model,
+            "request_timeout": settings.llm.request_timeout,
             # 密钥只属于环境变量或 Streamlit Secrets，禁止写入 config.json。
             "api_key": "",
         },
@@ -197,6 +250,8 @@ def save_settings(settings: Settings) -> None:
 
 
 def _environment_bool(name: str, default: bool) -> bool:
+    """严格解析布尔环境变量，拒绝把拼写错误静默当作 ``False``。"""
+
     value = os.getenv(name)
     if value is None:
         return default

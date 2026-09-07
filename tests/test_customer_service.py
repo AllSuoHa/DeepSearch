@@ -12,7 +12,16 @@ from deepsearch.infrastructure.config import (
     load_settings,
     save_settings,
 )
-from deepsearch.infrastructure.customer_service import CustomerServicePublisher
+from deepsearch.infrastructure.customer_service import (
+    CustomerServicePublisher,
+    DeliveryArtifact,
+    DeliveryError,
+)
+from deepsearch.infrastructure.storage import ConversationStore
+from deepsearch.presentation.web.delivery import (
+    build_library_delivery_artifact,
+    conversation_delivery_external_id,
+)
 
 
 class CustomerServicePublisherTests(unittest.TestCase):
@@ -36,14 +45,16 @@ class CustomerServicePublisherTests(unittest.TestCase):
 
     def test_successful_delivery_uses_both_auth_headers_and_contract(self):
         with tempfile.TemporaryDirectory() as directory:
-            captured = {}
+            captured = {"requests": []}
 
             def transport(request, timeout):
-                captured["url"] = request.full_url
+                captured["requests"].append((request.get_method(), request.full_url))
                 captured["headers"] = dict(request.header_items())
-                captured["payload"] = json.loads(request.data.decode("utf-8"))
                 captured["timeout"] = timeout
-                return 200, json.dumps({"document_id": 41, "idempotent_replay": False}).encode()
+                if request.get_method() == "POST":
+                    captured["payload"] = json.loads(request.data.decode("utf-8"))
+                    return 202, b'{"job_id":"ingest_41","status":"queued"}'
+                return 200, b'{"external_id":"scheduled","versions":[{"job_id":"ingest_41","status":"succeeded","document_id":"doc_41"}]}'
 
             settings = CustomerServiceSettings(
                 enabled=True,
@@ -58,8 +69,10 @@ class CustomerServicePublisherTests(unittest.TestCase):
             outcome = publisher.publish(task, result)
 
             self.assertEqual(outcome.status, "indexed")
-            self.assertEqual(outcome.document_id, 41)
-            self.assertTrue(captured["url"].endswith("/api/v1/integrations/deepsearch/documents"))
+            self.assertEqual(outcome.job_id, "ingest_41")
+            self.assertEqual(outcome.document_id, "doc_41")
+            self.assertTrue(captured["requests"][0][1].endswith("/api/v2/integrations/deepsearch/documents"))
+            self.assertIn("/api/v2/integrations/deepsearch/documents/scheduled-", captured["requests"][1][1])
             lowered_headers = {key.lower(): value for key, value in captured["headers"].items()}
             self.assertEqual(lowered_headers["x-integration-key"], "integration-secret")
             self.assertEqual(lowered_headers["authorization"], "Bearer global-secret")
@@ -94,13 +107,19 @@ class CustomerServicePublisherTests(unittest.TestCase):
             self.assertEqual(record["report_path"], str(result.report_path.resolve()))
             self.assertIn("content_hash", record)
 
+            def succeeding_transport(request, timeout):
+                if request.get_method() == "POST":
+                    return 202, b'{"job_id":"ingest_9","status":"queued"}'
+                return 200, b'{"versions":[{"job_id":"ingest_9","status":"succeeded","document_id":"doc_9"}]}'
+
             succeeding = CustomerServicePublisher(
-                settings,
-                transport=lambda request, timeout: (200, b'{"document_id": 9, "idempotent_replay": true}'),
-                sleeper=lambda _: None,
+                settings, transport=succeeding_transport, sleeper=lambda _: None
             )
             retried = succeeding.flush_pending(force=True)
-            self.assertEqual([(item.status, item.document_id) for item in retried], [("indexed", 9)])
+            self.assertEqual(
+                [(item.status, item.document_id) for item in retried],
+                [("indexed", "doc_9")],
+            )
             self.assertEqual(list(settings.outbox_dir.glob("*.json")), [])
 
     def test_same_task_keeps_stable_external_id_across_report_versions(self):
@@ -108,8 +127,10 @@ class CustomerServicePublisherTests(unittest.TestCase):
             external_ids = []
 
             def transport(request, timeout):
-                external_ids.append(json.loads(request.data)["external_id"])
-                return 200, b'{"document_id": 1}'
+                if request.get_method() == "POST":
+                    external_ids.append(json.loads(request.data)["external_id"])
+                    return 202, b'{"job_id":"ingest_1","status":"queued"}'
+                return 200, b'{"versions":[{"job_id":"ingest_1","status":"succeeded","document_id":"doc_1"}]}'
 
             settings = CustomerServiceSettings(
                 enabled=True,
@@ -172,7 +193,124 @@ class CustomerServicePublisherTests(unittest.TestCase):
             self.assertEqual(outcome.status, "queued")
             self.assertNotIn("integration-secret", record_text)
             self.assertNotIn("global-secret", record_text)
-            self.assertIn("[REDACTED]", record_text)
+            self.assertIn("拒绝了联动密钥", record_text)
+
+    def test_search_artifact_uses_the_same_publish_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "search.md"
+            snapshot.write_text("# Search\n\n[Official](https://example.org)", encoding="utf-8")
+            captured = {}
+
+            def transport(request, timeout):
+                if request.get_method() == "POST":
+                    captured.update(json.loads(request.data.decode("utf-8")))
+                    return 202, b'{"job_id":"ingest_7","status":"queued"}'
+                return 200, b'{"versions":[{"job_id":"ingest_7","status":"succeeded","document_id":"doc_7"}]}'
+
+            settings = CustomerServiceSettings(
+                enabled=True,
+                integration_key="integration-secret",
+                outbox_dir=Path(directory) / "outbox",
+            )
+            outcome = CustomerServicePublisher(settings, transport=transport).publish_artifact(
+                DeliveryArtifact("conversation-search-1", "Search", snapshot, kind="search")
+            )
+
+            self.assertEqual(outcome.status, "indexed")
+            self.assertEqual(captured["metadata"]["kind"], "search")
+
+    def test_v2_background_failure_is_not_reported_as_indexed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "search.md"
+            snapshot.write_text("# Search", encoding="utf-8")
+
+            def transport(request, timeout):
+                if request.get_method() == "POST":
+                    return 202, b'{"job_id":"ingest_failed","status":"queued"}'
+                return 200, b'{"versions":[{"job_id":"ingest_failed","status":"failed","document_id":null}]}'
+
+            settings = CustomerServiceSettings(
+                enabled=True,
+                integration_key="integration-secret",
+                retry_attempts=1,
+                outbox_dir=Path(directory) / "outbox",
+            )
+            outcome = CustomerServicePublisher(settings, transport=transport).publish_artifact(
+                DeliveryArtifact("conversation-search-1", "Search", snapshot, kind="search")
+            )
+
+            self.assertEqual(outcome.status, "queued")
+            self.assertIn("后台入库失败", outcome.error)
+            self.assertEqual(len(list(settings.outbox_dir.glob("*.json"))), 1)
+
+    def test_v2_response_without_job_id_is_a_visible_contract_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "search.md"
+            snapshot.write_text("# Search", encoding="utf-8")
+            settings = CustomerServiceSettings(
+                enabled=True,
+                integration_key="integration-secret",
+                retry_attempts=1,
+                outbox_dir=Path(directory) / "outbox",
+            )
+
+            outcome = CustomerServicePublisher(
+                settings,
+                transport=lambda request, timeout: (202, b'{"status":"queued"}'),
+            ).publish_artifact(DeliveryArtifact("conversation-search-1", "Search", snapshot))
+
+            self.assertEqual(outcome.status, "queued")
+            self.assertIn("缺少 job_id", outcome.error)
+
+    def test_disabled_integration_does_not_create_an_outbox_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "search.md"
+            snapshot.write_text("result", encoding="utf-8")
+            settings = CustomerServiceSettings(enabled=False, outbox_dir=Path(directory) / "outbox")
+
+            with self.assertRaises(DeliveryError):
+                CustomerServicePublisher(settings).publish_artifact(
+                    DeliveryArtifact("conversation-search-1", "Search", snapshot, kind="search")
+                )
+            self.assertFalse(settings.outbox_dir.exists())
+
+    def test_library_delivery_reuses_linked_conversation_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_path = root / "reports" / "answer.md"
+            report_path.parent.mkdir()
+            report_path.write_text("# Answer\n\nBody", encoding="utf-8")
+            store = ConversationStore(root / "data" / "conversations")
+            conversation = store.create()
+            store.append(conversation, {
+                "role": "assistant",
+                "content": "Body",
+                "mode": "research",
+                "kind": "research",
+                "question": "Original question",
+                "artifact_path": str(report_path),
+            })
+
+            artifact = build_library_delivery_artifact(
+                {
+                    "path": str(report_path),
+                    "title": "Answer",
+                    "kind": "研究报告",
+                    "format": "md",
+                },
+                store.directory,
+                "confidential",
+            )
+
+            self.assertEqual(
+                artifact.external_id,
+                conversation_delivery_external_id(
+                    conversation["id"], "research", "Original question"
+                ),
+            )
+            self.assertEqual(artifact.question, "Original question")
+            self.assertEqual(artifact.data_classification, "confidential")
+            self.assertEqual(artifact.metadata["source"], "library")
 
 
 if __name__ == "__main__":

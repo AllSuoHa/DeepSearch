@@ -1,278 +1,137 @@
-"""设置页面：管理研究预算、自主任务和模型连接说明。"""
+"""搜索、模型、联动与本地数据设置。"""
 
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
-from deepsearch.bootstrap import DeepSearchAgent, apply_profile
-from deepsearch.domain.models import ReportSpecification, ResearchBrief
 from deepsearch.infrastructure.cache import ResearchCache
 from deepsearch.infrastructure.config import save_settings
 from deepsearch.presentation.web.styles import render_page_header
 from deepsearch.presentation.web.support import get_settings
-from deepsearch.scheduling.topics import ResearchTaskManager, ResearchTaskScheduler, ScheduledResearchTask
 
 settings = get_settings()
-render_page_header(
-    "SYSTEM SETTINGS",
-    "设置",
-    "管理研究引擎、自动任务和模型连接。API Key 不会在页面中保存或显示。",
-)
+render_page_header("PREFERENCES", "设置", "管理搜索连接、研究模型、知识库联动和本地数据。密钥不会显示或写入配置文件。")
 
-with st.container(horizontal=True):
-    st.badge("LLM 已配置" if not settings.mock_llm else "确定性报告器", color="green" if not settings.mock_llm else "gray")
-    st.badge("离线 Mock" if settings.mock_search else "在线优先", color="violet" if settings.mock_search else "blue")
-    st.caption(f"配置文件：{settings.config_path.name}")
+search_tab, model_tab, integration_tab, data_tab = st.tabs([
+    ":material/search: 搜索",
+    ":material/neurology: 研究模型",
+    ":material/sync_alt: 知识库联动",
+    ":material/database: 本地数据",
+])
 
-engine_tab, tasks_tab, integration_tab, model_tab = st.tabs(
-    [
-        ":material/tune: 研究引擎",
-        ":material/event_repeat: 自主任务",
-        ":material/sync_alt: 知识库联动",
-        ":material/key: 模型连接",
-    ]
-)
-
-with engine_tab:
-    # 表单把多个控件的变化合并成一次 rerun 和一次原子保存。
-    st.subheader("研究预算与缓存")
-    st.caption("这些设置是均衡模式的默认值；快速和深度模式会为单次研究使用临时预算。")
-    with st.form("engine_settings"):
-        mode = st.segmented_control("运行模式", ["auto", "mock"], default=settings.mode, required=True)
-        search_provider = st.selectbox("主搜索源", ["duckduckgo", "mock"], index=0 if settings.search_provider == "duckduckgo" else 1)
-        col1, col2, col3 = st.columns(3)
-        max_rounds = col1.number_input("最大轮次", 1, 5, settings.max_rounds)
-        max_sources = col2.number_input("最大来源数", 4, 40, settings.max_sources)
-        results_per_query = col3.number_input("每个查询结果数", 1, 10, settings.results_per_query)
-        col4, col5, col6 = st.columns(3)
-        request_timeout = col4.number_input("请求超时（秒）", 2.0, 30.0, settings.request_timeout, 1.0)
-        per_domain_limit = col5.number_input("单域名来源上限", 1, 5, settings.per_domain_limit)
-        cache_hours = col6.number_input("缓存时长（小时）", 1, 168, max(1, settings.cache_ttl_seconds // 3600))
-        cache_enabled = st.toggle("启用搜索与正文缓存", value=settings.cache_enabled)
-        submitted = st.form_submit_button("保存设置", icon=":material/save:", type="primary")
-
-    if submitted:
-        # 只在用户明确提交时修改配置对象并持久化。
-        settings.mode = str(mode)
-        settings.search_provider = search_provider
+with search_tab:
+    st.subheader("搜索行为")
+    with st.form("search-settings"):
+        runtime_label = st.segmented_control(
+            "数据来源", ["在线", "演示"],
+            default="演示" if settings.runtime_mode == "mock" else "在线",
+            help="演示模式只使用 Mock 数据；在线模式绝不会用 Mock 伪装真实结果。",
+        )
+        work_label = st.segmented_control(
+            "默认工作模式", ["智能判断", "搜索", "研究"],
+            default={"auto": "智能判断", "search": "搜索", "research": "研究"}[settings.default_work_mode],
+        )
+        columns = st.columns(3)
+        max_rounds = columns[0].number_input("研究最大轮次", 1, 5, settings.max_rounds)
+        max_sources = columns[1].number_input("研究来源上限", 4, 40, settings.max_sources)
+        request_timeout = columns[2].number_input("请求超时（秒）", 2.0, 30.0, settings.request_timeout, 1.0)
+        saved = st.form_submit_button("保存搜索设置", type="primary", icon=":material/save:")
+    if saved:
+        settings.runtime_mode = "mock" if runtime_label == "演示" else "online"
+        settings.mode = "mock" if settings.runtime_mode == "mock" else "auto"
+        settings.default_work_mode = {"智能判断": "auto", "搜索": "search", "研究": "research"}[work_label]
         settings.max_rounds = int(max_rounds)
         settings.max_sources = int(max_sources)
-        settings.results_per_query = int(results_per_query)
         settings.request_timeout = float(request_timeout)
-        settings.per_domain_limit = int(per_domain_limit)
-        settings.cache_ttl_seconds = int(cache_hours) * 3600
-        settings.cache_enabled = cache_enabled
         save_settings(settings)
-        st.toast("设置已保存，将在下一次研究时生效。", icon=":material/check_circle:")
+        st.toast("搜索设置已保存。", icon=":material/check_circle:")
 
-    with st.container(horizontal=True, horizontal_alignment="right"):
-        if st.button("清空研究缓存", icon=":material/delete_sweep:"):
-            removed = ResearchCache(settings.cache_dir, settings.cache_ttl_seconds).clear()
-            st.toast(f"已清除 {removed} 个缓存条目。", icon=":material/check_circle:")
-
-with tasks_tab:
-    # 自主任务把调度规则和研究/报告要求作为一个原子配置保存。
-    st.subheader("自主研究任务")
-    st.caption("任务到期后会重新执行“搜索—评估—补搜—总结”循环，而不是复用一份静态链接列表。")
-    manager = ResearchTaskManager(settings)
-    weekday_labels = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
-
-    with st.form("research_task_add"):
-        st.markdown("**任务目标**")
-        name = st.text_input("任务名称", placeholder="例如：AI 行业日报")
-        question = st.text_area("研究问题", placeholder="例如：总结最近一天大模型与 AI Agent 领域的重要变化")
-        objective = st.text_input("报告目标", value="形成包含事实、影响判断和行动建议的总结报告")
-
-        st.markdown("**时间周期**")
-        schedule_left, schedule_middle, schedule_right = st.columns(3)
-        schedule_type = schedule_left.selectbox(
-            "周期",
-            ["daily", "weekly", "once"],
-            format_func=lambda value: {"daily": "每天", "weekly": "每周", "once": "单次"}[value],
-        )
-        run_time = schedule_middle.time_input("执行时间")
-        run_date = schedule_right.date_input("单次日期")
-        weekdays = st.multiselect(
-            "每周执行日",
-            list(weekday_labels),
-            default=[0, 1, 2, 3, 4],
-            format_func=lambda value: weekday_labels[value],
-        )
-
-        st.markdown("**研究范围**")
-        scope_left, scope_right = st.columns(2)
-        domain = scope_left.text_input("知识领域", value="人工智能与大模型")
-        time_scope = scope_right.selectbox("信息时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天", "不限"])
-        information_types = st.pills(
-            "信息类型",
-            ["新闻", "公告", "知识", "研究", "数据", "政策"],
-            default=["新闻", "公告", "研究"],
-            selection_mode="multi",
-        )
-
-        st.markdown("**报告交付**")
-        report_left, report_middle, report_right = st.columns(3)
-        output_format = report_left.selectbox("文件格式", ["markdown", "text", "json"])
-        target_words = report_middle.number_input("目标篇幅（字）", 300, 5000, 1800, 100)
-        profile = report_right.selectbox("研究强度", ["快速", "均衡", "深度"], index=2)
-        audience = st.text_input("目标读者", value="技术负责人")
-        sections = st.multiselect(
-            "报告章节",
-            ["摘要", "重大事件", "关键结论", "详细分析", "技术进展", "行业影响", "风险与限制", "建议与下一步", "证据局限与争议"],
-            default=["摘要", "重大事件", "技术进展", "行业影响", "建议与下一步"],
-        )
-        instructions = st.text_area(
-            "内容与模板要求",
-            value="按重要性排序，区分已确认事实、分析判断和建议；重要结论必须带引用。",
-        )
-        deliver_to_customer_service = st.checkbox(
-            "研究完成后自动提交到 CustomerService 知识库",
-            help="投递失败不会重新执行搜索，而会进入本地 outbox 等待重试。",
-        )
-        data_classification = st.segmented_control(
-            "文档密级",
-            ["public", "internal", "confidential"],
-            default="internal",
-            help="CustomerService 默认拒绝 confidential，除非接收端显式放行。",
-        )
-        add_task = st.form_submit_button("保存自主任务", icon=":material/add_task:", type="primary")
-
-    if add_task:
-        try:
-            report = ReportSpecification(
-                output_format=output_format,
-                target_words=int(target_words),
-                audience=audience.strip() or "通用读者",
-                sections=tuple(sections) or ReportSpecification().sections,
-                custom_instructions=instructions.strip(),
-            )
-            brief = ResearchBrief(
-                domain=domain.strip() or "通用",
-                objective=objective.strip() or "形成可验证、可执行的总结报告",
-                information_types=tuple(information_types or ["知识"]),
-                time_scope=time_scope,
-                report=report,
-            )
-            task = ScheduledResearchTask(
-                name=name.strip(),
-                question=question.strip(),
-                schedule_type=schedule_type,
-                run_time=run_time.strftime("%H:%M"),
-                weekdays=tuple(weekdays),
-                run_date=run_date.strftime("%Y-%m-%d") if schedule_type == "once" else "",
-                profile=profile,
-                deliver_to_customer_service=deliver_to_customer_service,
-                data_classification=str(data_classification or "internal"),
-                brief=brief,
-            )
-            manager.add_task(task)
-        except ValueError as exc:
-            st.error(str(exc), icon=":material/error:")
-        else:
-            st.toast(f"任务“{name}”已保存。", icon=":material/check_circle:")
-            st.rerun()
-
-    tasks = manager.list()
-    if tasks:
-        rows = [{
-            "任务": task.name,
-            "周期": {"daily": "每天", "weekly": "每周", "once": "单次"}[task.schedule_type],
-            "时间": task.run_time,
-            "领域": task.brief.domain,
-            "信息类型": "、".join(task.brief.information_types),
-            "强度": task.profile,
-            "交付": f"{task.brief.report.output_format} / {task.brief.report.target_words} 字",
-            "知识库": task.data_classification if task.deliver_to_customer_service else "不提交",
-            "状态": "启用" if task.enabled else "停用",
-        } for task in tasks]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, key="research_tasks_table")
-        selected_name = st.selectbox("选择任务", [task.name for task in tasks], key="selected_research_task")
-        selected_task = manager.get(selected_name)
-        with st.container(horizontal=True, horizontal_alignment="right"):
-            if st.button("立即运行", icon=":material/play_arrow:"):
-                scheduler = ResearchTaskScheduler(
-                    settings,
-                    agent_factory=lambda selected_profile: DeepSearchAgent(apply_profile(settings, selected_profile)),
-                )
-                try:
-                    with st.status(f"正在执行“{selected_name}”…", expanded=True) as task_status:
-                        result = scheduler.run_now(selected_name, lambda phase, message: task_status.write(f"**{phase}** · {message}"))
-                        task_status.update(label=f"任务完成：{result.report_path.name}", state="complete", expanded=False)
-                except Exception as exc:
-                    st.error(f"任务执行失败：{exc}", icon=":material/error:")
-                else:
-                    st.success(f"报告已生成：{result.report_path}", icon=":material/check_circle:")
-            if selected_task and st.button(
-                "停用" if selected_task.enabled else "启用",
-                icon=":material/pause_circle:" if selected_task.enabled else ":material/play_circle:",
-            ):
-                manager.set_enabled(selected_name, not selected_task.enabled)
-                st.rerun()
-            if st.button("删除", icon=":material/delete:"):
-                manager.remove(selected_name)
-                st.rerun()
-    else:
-        st.info("尚未配置自主研究任务。", icon=":material/event_busy:")
-
-with integration_tab:
-    st.subheader("CustomerService 知识库联动")
-    st.caption("全局开关和单个任务的交付选项必须同时开启；凭据不会写入 config.json。")
-    with st.form("customer_service_settings"):
-        integration_enabled = st.checkbox(
-            "启用 CustomerService 自动投递",
-            value=settings.customer_service.enabled,
-        )
-        customer_service_url = st.text_input(
-            "CustomerService 地址",
-            value=settings.customer_service.base_url,
-            placeholder="http://127.0.0.1:8000",
-        )
-        timeout_column, retry_column, backoff_column = st.columns(3)
-        integration_timeout = timeout_column.number_input(
-            "请求超时（秒）", 2.0, 120.0, settings.customer_service.request_timeout, 1.0
-        )
-        integration_retries = retry_column.number_input(
-            "即时重试次数", 1, 10, settings.customer_service.retry_attempts
-        )
-        integration_backoff = backoff_column.number_input(
-            "退避基数（秒）", 0.0, 60.0, settings.customer_service.retry_backoff_seconds, 0.5
-        )
-        save_integration = st.form_submit_button("保存联动设置", icon=":material/save:", type="primary")
-
-    if save_integration:
-        settings.customer_service.enabled = integration_enabled
-        settings.customer_service.base_url = customer_service_url.strip().rstrip("/")
-        settings.customer_service.request_timeout = float(integration_timeout)
-        settings.customer_service.retry_attempts = int(integration_retries)
-        settings.customer_service.retry_backoff_seconds = float(integration_backoff)
-        save_settings(settings)
-        st.toast("联动设置已保存。", icon=":material/check_circle:")
-
-    pending_count = (
-        len(list(settings.customer_service.outbox_dir.glob("*.json")))
-        if settings.customer_service.outbox_dir.exists()
-        else 0
-    )
     with st.container(border=True):
-        st.metric("待投递报告", pending_count)
-        st.caption(f"Outbox：{settings.customer_service.outbox_dir}")
-    st.code(
-        'DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "与 CustomerService 一致的专用密钥"\n'
-        'DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "可选：CustomerService 全局 API Key"',
-        language="toml",
-    )
-    st.info(
-        "可把以上值放入环境变量或 `.streamlit/secrets.toml`；页面只读取，不显示真实值。",
-        icon=":material/security:",
-    )
+        st.markdown("**搜索源状态**")
+        with st.container(horizontal=True):
+            st.badge("Brave 已配置" if settings.brave_api_key else "Brave 未配置", color="green" if settings.brave_api_key else "gray")
+            st.badge("DuckDuckGo 回退", color="blue")
+            st.badge("Wikipedia 回退", color="blue")
+            st.badge("OpenAlex + Crossref", color="violet")
+        st.caption("Brave 未配置时仍可使用免费来源，但稳定性与覆盖率可能较低。")
+        st.code('DEEPSEARCH_BRAVE_API_KEY = "your-brave-search-key"', language="toml")
 
 with model_tab:
-    # 页面只展示配置方法，绝不回显真实 API Key。
-    st.subheader("模型与密钥")
-    st.caption("使用环境变量或 `.streamlit/secrets.toml` 配置。缺少 Key 时自动使用确定性报告器。")
+    st.subheader("三阶段研究模型")
+    with st.container(border=True):
+        st.badge("模型可用" if not settings.mock_llm else "尚未配置", color="green" if not settings.mock_llm else "orange")
+        st.caption(f"当前模型：{settings.llm.model} · {settings.llm.base_url}")
+        st.markdown("研究模式会依次执行证据整理、初稿生成和独立审校重写。没有模型时研究会明确停止，搜索仍可使用。")
+    with st.form("model-settings"):
+        model_timeout = st.number_input(
+            "模型单次请求超时（秒）",
+            min_value=30.0,
+            max_value=900.0,
+            value=float(settings.llm.request_timeout),
+            step=30.0,
+            help="思考模型处理长报告时首个响应可能较慢；此超时独立于网页抓取超时。",
+        )
+        saved_model = st.form_submit_button("保存模型设置", type="primary", icon=":material/save:")
+    if saved_model:
+        settings.llm.request_timeout = float(model_timeout)
+        save_settings(settings)
+        st.toast("模型设置已保存。", icon=":material/check_circle:")
     st.code(
-        'DEEPSEARCH_API_KEY = "your-key"\nDEEPSEARCH_BASE_URL = "https://api.openai.com/v1"\nDEEPSEARCH_MODEL = "gpt-4o-mini"',
+        'DEEPSEARCH_API_KEY = "your-key"\n'
+        'DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"\n'
+        'DEEPSEARCH_MODEL = "gpt-4o-mini"\n'
+        'DEEPSEARCH_LLM_TIMEOUT = 180',
         language="toml",
     )
-    st.info("密钥不会写入 `config.json`，保存普通设置时也会主动清空密钥字段。", icon=":material/security:")
+    st.caption("可放入环境变量或 `.streamlit/secrets.toml`，保存普通设置时不会落盘。")
+
+with integration_tab:
+    st.subheader("CustomerService")
+    st.caption("搜索和研究完成后都会显示手动推送入口；DeepSearch 会等待 v2 后台入库完成后再提示成功。")
+    with st.form("customer-service-settings"):
+        integration_enabled = st.toggle("启用知识库联动", value=settings.customer_service.enabled)
+        customer_service_url = st.text_input("服务地址", value=settings.customer_service.base_url, placeholder="http://127.0.0.1:8000")
+        columns = st.columns(3)
+        timeout = columns[0].number_input("超时（秒）", 2.0, 120.0, settings.customer_service.request_timeout, 1.0)
+        retries = columns[1].number_input("即时重试", 1, 10, settings.customer_service.retry_attempts)
+        backoff = columns[2].number_input("退避基数（秒）", 0.0, 60.0, settings.customer_service.retry_backoff_seconds, 0.5)
+        saved_integration = st.form_submit_button("保存联动设置", type="primary", icon=":material/save:")
+    if saved_integration:
+        settings.customer_service.enabled = integration_enabled
+        settings.customer_service.base_url = customer_service_url.strip().rstrip("/")
+        settings.customer_service.request_timeout = float(timeout)
+        settings.customer_service.retry_attempts = int(retries)
+        settings.customer_service.retry_backoff_seconds = float(backoff)
+        save_settings(settings)
+        st.toast("联动设置已保存。", icon=":material/check_circle:")
+    with st.container(border=True):
+        # 页面只展示凭据是否存在，不读取或回显密钥正文。
+        if not settings.customer_service.enabled:
+            st.badge("联动未启用", color="gray")
+        elif not settings.customer_service.integration_key:
+            st.badge("缺少联动密钥", color="orange")
+            st.warning(
+                "页面无法推送是因为 `DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY` 尚未配置。",
+                icon=":material/key:",
+            )
+        else:
+            st.badge("DeepSearch 端已配置", color="green")
+            st.caption("还需确保 CustomerService 的 `DEEPSEARCH_INTEGRATION_KEY` 使用完全相同的值。")
+        st.caption(
+            f"当前 API 根地址：`{settings.customer_service.base_url}`。这里应填写 API 端口（通常为 8000），不是 Streamlit 页面端口。"
+        )
+    st.code(
+        'DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "integration-key"\n'
+        'DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "optional-api-key"',
+        language="toml",
+    )
+    st.caption("修改 `.streamlit/secrets.toml` 后需要重启 DeepSearch，普通设置保存不会写入或覆盖密钥。")
+
+with data_tab:
+    st.subheader("本地存储")
+    st.caption(f"会话：{settings.conversation_dir}")
+    st.caption(f"报告：{settings.reports_dir}")
+    st.caption(f"搜索缓存：{settings.cache_dir}")
+    if st.button("清空搜索与正文缓存", icon=":material/delete_sweep:"):
+        removed = ResearchCache(settings.cache_dir, settings.cache_ttl_seconds).clear()
+        st.toast(f"已清除 {removed} 个缓存条目；会话和报告未删除。", icon=":material/check_circle:")

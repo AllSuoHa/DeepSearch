@@ -1,45 +1,33 @@
-# DeepSearch 文档索引
+# DeepSearch 文档
 
-> 对应产品版本：2.1.0 · 最后校准：2026-08-28
+> 对应版本：2.2.0 · 最后校准：2026-09-07
 
-## 推荐阅读顺序
+本目录只保留当前版本需要维护的三份专题文档，避免产品介绍、历史总结和需求追踪在多处重复。
 
-| 读者 | 文档 | 解决的问题 |
+| 读者/目标 | 文档 | 内容边界 |
 |---|---|---|
-| 第一次使用 | [`../README.md`](../README.md) | 项目是什么、如何安装和首次运行 |
-| 日常使用者 | [`USER_GUIDE.md`](USER_GUIDE.md) | CLI、Web、配置、追问、调度和排错 |
-| 开发者 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 当前目录、依赖规则、时序和扩展方式 |
-| 维护者 | [`DEV_NOTES.md`](DEV_NOTES.md) | 技术取舍、算法边界、测试和演进历史 |
-| 验收/面试 | [`REQUIREMENTS_TRACEABILITY.md`](REQUIREMENTS_TRACEABILITY.md) | F1–F16 是否实现、代码和测试证据在哪里 |
-| 演示者 | [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md) | 运行、测试、难点、评估、问答和演示脚本 |
-| 需求追溯 | [`../pro.md`](../pro.md) | 原始产品需求历史基线和当前状态说明 |
+| 首次了解与快速运行 | [根 README](../README.md) | 产品定位、安装、基础配置、常用命令、目录总览 |
+| 日常使用者 | [USER_GUIDE.md](USER_GUIDE.md) | Web/CLI 操作、模式选择、数据管理、联动和故障排查 |
+| 开发者与评审者 | [ARCHITECTURE.md](ARCHITECTURE.md) | 分层、运行流程、状态模型、质量门、安全边界和扩展点 |
+| 维护者 | [DEV_NOTES.md](DEV_NOTES.md) | 技术决策、测试矩阵、维护约定、演进记录和路线图 |
 
-## 文档边界
+## 当前事实口径
 
-- `README.md` 与 `docs/*.md` 描述当前 2.1.0 实现；
-- `pro.md` 保留最初的业务目标和验收口径，顶部说明实现差异；
-- `reports/*.md` 是每次研究生成的运行产物，不属于手写产品文档；
-- `.streamlit/secrets.toml.example`、`config.example.json` 是配置模板，不保存真实密钥；
-- 源码目录、命令、默认值或测试数量变化时，应同步更新当前文档集。
+- `runtime_mode=online/mock` 决定数据来源；`WorkMode=auto/search/research` 决定本次请求的产品流程，两者彼此独立。
+- 搜索不需要大模型；在线研究需要 OpenAI Chat Completions 兼容模型。
+- 三阶段研究是同一模型依次执行证据整理、初稿生成和独立审校，不是配置三个模型。
+- 在线搜索失败会明确报错，不会自动混入 Mock；Mock 只能显式启用。
+- 只有通过质量门的研究报告才保存；搜索结果以独立 Markdown 快照保存。
+- 当前默认回归收集 69 项测试。
 
-## 当前统一口径
+## 文档维护规则
 
-- 产品版本：2.1.0；
-- Python：3.11+；
-- 默认均衡预算：3 轮、16 来源、每查询 4 候选；
-- Web 导航：首页、研究、证据、报告、设置；
-- 默认报告目录：仓库根 `reports/`；
-- 默认缓存目录：`.cache/deepsearch/`；
-- 当前回归：24 项测试全部通过；
-- 架构：domain/application/infrastructure/presentation/scheduling + `bootstrap.py` 组合根。
+修改功能时按以下顺序同步：
 
-## 维护检查
+1. 命令、安装方式、默认值或环境变量变化：更新根 README 和用户手册。
+2. 模块依赖、运行流程、状态或存储结构变化：更新架构说明。
+3. 关键取舍、兼容策略、测试覆盖或路线变化：更新开发与维护文档。
+4. `config.example.json`、`.streamlit/secrets.toml.example`、代码默认值和文档必须保持一致。
+5. `reports/` 是程序生成的研究产物，不属于项目手写文档，不做批量整理。
 
-提交涉及架构或入口的变更前，至少执行：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-rg -n "V1|V1\.1|15 项|概览|研究工作台|证据智能|报告中心|引擎设置|presentation/reports" README.md pro.md docs --glob "!docs/README.md"
-```
-
-命中不一定是错误：`pro.md` 和 `DEV_NOTES.md` 会保留明确标注的历史版本；重点检查是否把历史描述误写为“当前”。
+原始产品需求、2.1 阶段总结和独立需求追踪表已经合并到现有文档；历史版本仍可通过 Git 查看。

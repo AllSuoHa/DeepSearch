@@ -1,228 +1,325 @@
-# DeepSearch 2.1 架构说明
+# DeepSearch 2.2 架构说明
 
-> 状态：当前实现 · 最后校准：2026-08-28
+> 当前实现基线 · 最后校准：2026-09-07
 
-## 1. 架构目标
+## 1. 系统定位与边界
 
-DeepSearch 采用轻量 Clean Architecture，目标不是增加目录数量，而是把四类变化隔离：研究策略、外部网络、交付界面和本地运行配置。
+DeepSearch 是单机、单用户、本地优先的 AI 搜索与研究助手。核心目标是用同一套领域模型支持两种不同交付：快速、链接优先的搜索结果，以及经过证据综合和质量门的研究报告。
 
-- 研究规则不依赖 Streamlit、HTTP、文件系统或具体模型供应商；
-- 搜索、抓取、缓存、模型和存储通过应用层端口注入；
-- CLI、Web 和调度器消费同一个 `ResearchResult`；
-- Mock 与真实实现走同一研究用例，测试不需要复制业务流程；
-- 项目级路径以仓库根或配置文件目录为基准，不在包内生成第二套数据。
+系统有两个正交维度：
 
-## 2. 源码依赖规则
+| 维度 | 取值 | 决定什么 |
+|---|---|---|
+| 运行数据模式 | `runtime_mode=online/mock` | 使用真实在线来源还是显式演示数据 |
+| 请求工作模式 | `WorkMode=AUTO/SEARCH/RESEARCH` | 本次返回搜索卡片还是研究报告 |
+
+`AUTO` 不是离线/在线开关。旧 `mode=auto/mock` 只作为配置兼容入口，在加载时映射到 `runtime_mode`。
+
+明确不在当前范围内：账号、多租户、云同步、分布式任务、浏览器渲染、付费墙绕过、扫描 PDF OCR、向量知识库和生产级事实证明。
+
+## 2. 分层和依赖方向
 
 ```mermaid
-flowchart LR
-    PRES[Presentation<br/>CLI / Streamlit] --> BOOT[Composition root<br/>bootstrap.py]
-    SCHED[Scheduling] --> BOOT
-    BOOT --> APP[Application<br/>ResearchService / Ports]
-    BOOT --> INFRA[Infrastructure<br/>Adapters]
-    APP --> DOMAIN[Domain<br/>Models / Ranking]
-    INFRA --> APP
-    INFRA --> DOMAIN
+flowchart TB
+    WEB[Streamlit pages] --> FACADE[DeepSearchAgent]
+    CLI[CLI] --> FACADE
+    JOBS[Scheduler] --> FACADE
+    FACADE --> ROUTE[IntentClassifier]
+    FACADE --> SEARCH[SearchService]
+    FACADE --> RESEARCH[ResearchService]
+    RESEARCH --> PORTS[Application Protocols]
+    SEARCH --> DOMAIN[Domain Models]
+    PORTS --> DOMAIN
+    ADAPTERS[Search / Fetch / LLM / Cache / Storage / Delivery] -. implement .-> PORTS
+    BOOT[bootstrap.py Composition Root] -. creates .-> FACADE
+    BOOT -. injects .-> ADAPTERS
 ```
 
-这里区分两种方向：
+依赖规则：
 
-1. **源码依赖方向**：基础设施实现 `application/ports.py` 的协议，因此 `infrastructure → application`；应用层不能导入具体基础设施。
-2. **运行时调用方向**：`ResearchService` 通过协议调用注入对象，看起来像 `application → port implementation`，但应用层并不知道实现类名称。
+- `domain`：跨层数据结构与稳定排序，不依赖 Streamlit、HTTP 或磁盘。
+- `application`：工作模式识别、搜索用例、研究反馈循环、验证和评分；只面向领域模型与 Protocol。
+- `infrastructure`：搜索 API、网页抓取、模型客户端、报告器、缓存、文件存储和 CustomerService 投递。
+- `presentation`：CLI 与 Streamlit 适配；把用户输入转换为 `AgentRequest`，把结果转换为界面或终端输出。
+- `scheduling`：自动任务模型、到期判断和执行状态；继续调用统一 Agent。
+- `bootstrap.py`：唯一组合根，集中实例化和注入具体适配器。
 
-允许的主要依赖如下：
+页面不会重写研究业务，应用层也不会直接创建具体搜索源或文件存储。
 
-| 调用方 | 可以依赖 | 不应依赖 |
+## 3. 入口与核心对象
+
+### 3.1 外部入口
+
+| 入口 | 文件 | 职责 |
 |---|---|---|
-| `domain` | 标准库 | application、infrastructure、Streamlit |
-| `application` | domain、application ports | 具体搜索器、文件存储、Streamlit |
-| `infrastructure` | domain、application ports | 页面脚本 |
-| `presentation` | bootstrap、domain 展示模型 | 直接实例化搜索/缓存/存储实现 |
-| `scheduling` | bootstrap facade、config | Streamlit 页面状态 |
-| `bootstrap.py` | 所有需要装配的模块 | 页面布局逻辑 |
+| Web | `streamlit_app.py` | 页面注册、主题、幂等 Session State 初始化和侧栏 |
+| Web 页面 | `app_pages/*.py` | 输入、展示和用户操作 |
+| CLI | `deepsearch/presentation/cli.py` | 参数解析、退出码、前台调度和日志 |
+| Python API | `deepsearch/bootstrap.py` | `DeepSearchAgent` 稳定公共门面 |
 
-## 3. 当前目录与职责
+### 3.2 统一调用
 
-```text
-DeepSearch/
-├── deepsearch/
-│   ├── domain/
-│   │   ├── models.py           # Brief、ReportSpec、Plan、Source、Trace、Scorecard、Result
-│   │   └── ranking.py          # 相关性、来源质量和域名多样性
-│   ├── application/
-│   │   ├── service.py          # 研究主循环、追问复用、硬预算
-│   │   ├── ports.py            # Planner/Search/Fetcher/Cache/Reporter/Storage 等协议
-│   │   ├── planner.py          # 分类、拆解、充分性判断、查询调整
-│   │   ├── verification.py     # 证据聚合、冲突提示、引用与覆盖校验
-│   │   ├── evaluation.py       # 五维质量评分
-│   │   └── prompts.py          # 集中管理模型提示模板
-│   ├── infrastructure/
-│   │   ├── search/
-│   │   │   ├── base.py         # 搜索适配器公共边界
-│   │   │   ├── duckduckgo.py   # DuckDuckGo HTML
-│   │   │   ├── wikipedia.py    # MediaWiki API
-│   │   │   └── mock.py         # 确定性离线来源
-│   │   ├── config.py           # 默认值、JSON、环境变量、原子保存
-│   │   ├── cache.py            # TTL 磁盘缓存
-│   │   ├── fetcher.py          # 并发正文抓取与摘要降级
-│   │   ├── llm.py              # OpenAI 兼容客户端与一次有界重试
-│   │   ├── reporting.py        # LLM/确定性结论综合报告器
-│   │   ├── storage.py          # Markdown/Text/JSON 导出、列表和搜索
-│   │   └── customer_service.py # 知识库 HTTP 投递、认证、重试和路径型 outbox
-│   ├── presentation/
-│   │   ├── cli.py              # ask/interactive/history/topics/schedule/web
-│   │   └── web/
-│   │       ├── support.py      # Session State、配置、视图行转换
-│   │       └── styles.py       # 集中加载品牌 CSS
-│   ├── scheduling/topics.py    # 自主任务模型、每日/每周/单次幂等调度
-│   ├── bootstrap.py            # 唯一组合根、DeepSearchAgent facade、三档模式
-│   └── __main__.py             # python -m deepsearch
-├── app_pages/                  # 五个直接执行的 Streamlit 页面脚本
-├── assets/                     # CSS 与 SVG
-├── .streamlit/                 # 主题、服务配置和 secrets 示例
-├── tests/                      # 离线优先回归测试
-├── docs/                       # 当前文档集
-├── reports/                    # 唯一默认报告目录
-└── streamlit_app.py            # st.navigation 多页面入口
+```python
+DeepSearchAgent.run(AgentRequest) -> AgentRunResult
 ```
 
-`__pycache__`、`.cache/`、`logs/`、`config.json`、`.streamlit/secrets.toml` 和生成报告都是运行产物，不属于逻辑架构。
+- `AgentRequest`：问题、请求模式、`ResearchBrief`、语言/地区和会话 ID。
+- `AgentRunResult`：只包含 `SearchResponse` 或 `ResearchResult` 中的一种。
+- `ResearchBrief`：领域、目标、信息类型、时间范围和 `ReportSpecification`。
+- `ReportSpecification`：输出格式、篇幅、读者、语言、章节和额外要求。
 
-## 4. 组合根与公共入口
+`research()` 和 `follow_up()` 是研究专用兼容入口。CLI `ask` 默认研究是历史兼容行为，Web 默认由 `default_work_mode` 控制。
 
-`bootstrap.py` 是唯一集中创建具体基础设施对象的位置：
+### 3.3 Web 长任务状态
 
-```text
-Settings
-  ├─ ResearchPolicy
-  ├─ DuckDuckGoSearch + WikipediaSearch 或 MockSearch
-  ├─ WebFetcher + ResearchCache + SourceRanker
-  ├─ ResearchPlanner + CrossVerifier + AnswerValidator
-  ├─ MarkdownReporter(+ optional LLM)
-  ├─ FileReportStorage
-  └─ ResearchQualityEvaluator
-                 ↓
-           ResearchService
-                 ↓
-       DeepSearchAgent facade
-```
+Streamlit 页面不在主脚本线程中直接执行阻塞研究。页面先构造完整 `AgentRequest` 和 Agent，再把纯 Python 调用提交给共享的有限 `ThreadPoolExecutor`；后台线程只能向线程安全的 `RunProgressTracker` 写入应用层 phase/message，不能访问 Session State 或调用 `st.*`。
 
-`DeepSearchAgent` 只保留稳定 API：`research()` 和 `follow_up()`。它不拥有研究算法；主循环在 `application/service.py`。这样既兼容 CLI/调度器/外部脚本，又能独立注入 Fake 或 Mock 端口测试应用层。
+页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 因此可以每秒更新总用时，折叠区展示高层思考步骤、阶段说明和单步用时。任务结束后页面线程负责持久化、结果渲染和清除停止按钮。停止信号在阶段回调边界生效，不会强杀正在进行的 HTTP 请求，也不是可恢复的后台作业系统。
 
-## 5. 单次研究时序
+页面滚动是唯一需要浏览器能力的交互，隔离在 `presentation/web/scroll_controls.py` 的内联 CCv2 组件。组件挂载于耗时研究之前，以 Shadow DOM 和主题变量绘制回顶/到底按钮，从受信任候选中动态定位实际滚动节点；按钮只在主内容区滚轮活动时按可用方向短暂淡入，空闲后淡出。点击滚动由可随滚轮取消的帧动画完成，不传递业务数据、不阻止默认滚轮，也不触发应用 rerun；其余页面行为继续优先使用原生 Streamlit API。
+
+## 4. 路由与搜索流程
+
+`IntentClassifier` 在显式选择为 `AUTO` 时才运行。它比较搜索关键词和研究关键词的命中数；研究信号严格更多时进入研究，否则保守选择搜索。
 
 ```mermaid
 sequenceDiagram
-    actor U as User
-    participant UI as CLI / Streamlit
+    participant UI as Web / CLI
     participant A as DeepSearchAgent
-    participant RS as ResearchService
-    participant P as Planner
-    participant S as Search ports
-    participant F as Fetcher
-    participant V as Verifier / Validator
-    participant R as Reporter
-    participant Q as Quality evaluator
-    participant ST as Storage
-
-    U->>UI: question
-    UI->>A: research(question, progress)
-    A->>RS: delegate
-    RS->>P: plan(question)
-    RS-->>UI: PLAN progress
-    loop until sufficient or budget exhausted
-        RS->>S: provider × query concurrently
-        S-->>RS: candidates or Mock fallback
-        RS->>F: fetch ranked new sources
-        F-->>RS: body / snippet / error state
-        RS->>P: evaluate(plan, all sources, round state)
-        P-->>RS: sufficient, reason, missing, next queries
+    participant S as SearchService
+    participant P as Search Providers
+    UI->>A: AgentRequest
+    A->>A: 解析 WorkMode
+    A->>S: search(question, locale, region)
+    S->>S: 识别媒体/学术意图并补充查询
+    par 搜索源 × 查询并发
+        S->>P: search
     end
-    RS->>V: organize evidence and conflicts
-    RS->>R: generate cited report
-    RS->>V: validate structure, coverage and citation support
-    alt invalid after repair
-        RS->>R: rebuild deterministic report
-    end
-    RS->>ST: export Markdown / Text / JSON
-    RS->>Q: evaluate scorecard
-    RS-->>UI: ResearchResult
-    UI-->>U: report, trace, sources and score
+    P-->>S: SearchResult[]
+    S->>S: URL 校验、危险词过滤、分类、去重、排序
+    S-->>A: SearchResponse
+    A-->>UI: AgentRunResult(search=...)
 ```
 
-## 6. 状态、预算与停止条件
+在线通用搜索源由 `search_provider_order` 决定：Brave 仅在 Key 存在时创建，DuckDuckGo 和 Wikipedia 可免费使用。学术意图追加 OpenAlex 与 Crossref。
 
-`ResearchPolicy` 是单次研究的不可变预算：`max_rounds`、`results_per_query`、`max_sources` 和 `mock_search`。`ResearchBrief` 则描述领域、目标、信息类型、时间范围和 `ReportSpecification`。Web 模式和自主任务都把这些对象作为真实输入传入规划器与报告器，而不是只在界面展示。
+搜索不抓取全文、不调用模型，也不进入研究质量评分。它输出 `SearchResponse`，随后由展示层保存为 `data/artifacts/` 下的 Markdown 快照。
 
-| 模式 | 最大轮次 | 最大来源 | 每查询候选 | 用途 |
-|---|---:|---:|---:|---|
-| 快速 | 1 | 8 | 3 | 事实核查、快速浏览 |
-| 均衡 | 配置值（默认 3） | 配置值（默认 16） | 配置值（默认 4） | 日常分析 |
-| 深度 | 4 | 28 | 6 | 对比、技术选型、复杂调研 |
+关键不变量：
 
-停止并非简单固定循环，按业务判断与硬预算共同决定：
+- 在线模式不创建或接受 Mock 结果；所有在线源都无结果时抛出 `SearchUnavailableError`。
+- 非 Mock 在线结果只允许 HTTP(S) URL。
+- 明显盗版、破解、种子和恶意下载信号会被过滤。
+- 影视结果按正规播放平台、官方信息、社区与聚合、普通网页排序。
 
-1. 简单事实有可用来源即可停止；
-2. 复杂问题在最低轮次前继续，以产生一次真实策略反馈；
-3. 来源和子问题覆盖达到阈值时停止；
-4. 连续两轮无新增来源时停止；
-5. 达到最大来源或最大轮次时停止。
+## 5. 研究反馈循环
 
-每轮产生 `RoundTrace`；整次研究产生 `ResearchMetrics` 和 `ResearchScorecard`。三者均进入 `ResearchResult`，展示层不再解析日志来推断状态。
+在线研究在规划和网络请求之前检查模型 Key，缺失时抛出 `ResearchModelRequiredError`。
 
-## 7. 证据与质量边界
+```mermaid
+flowchart TD
+    P[规划问题、子问题和初始查询] --> S[并发搜索]
+    S --> D[规范化 URL、去重与排序]
+    D --> F[缓存命中 + 并发正文抓取]
+    F --> E{证据充分?}
+    E -->|否，预算未用尽| A[根据缺失维度调整查询]
+    A --> S
+    E -->|是/边际收益低/预算到达| V[证据分组与冲突提示]
+    V --> M1[模型 1：证据整理 JSON]
+    M1 --> M2[模型 2：结论优先初稿]
+    M2 --> M3[模型 3：独立审校与终稿 JSON]
+    M3 --> Q{确定性质量门}
+    Q -->|首次失败| FIX[唯一一次针对性模型修订]
+    FIX --> Q2{再次校验}
+    Q -->|通过| SCORE[质量评分]
+    Q2 -->|通过| SCORE
+    Q2 -->|失败| ERR[ReportQualityError，不落盘]
+    SCORE --> SAVE[保存并返回 ResearchResult]
+```
 
-- `CrossVerifier` 以规范化文本主题聚合证据；同主题多源标为多源，数字集合不一致时提示口径冲突。
-- `AnswerValidator` 检查引用编号、必要章节、子问题标题和详细论点与所引文本的词项重叠。
-- 校验失败先做轻量引用修复；仍失败则使用确定性报告器重建。
-- `ResearchQualityEvaluator` 给出五维风险画像，但不声称自动证明事实为真。
+### 5.1 规划与停止条件
 
-当前验证属于确定性、可测试的工程下限，不是 NLI/蕴含模型，也不会裁决统计口径、来源时效和作者身份。
+`ResearchPlanner` 是确定性下限，不依赖模型。它按问题类型拆分子问题并设置最低轮次：
 
-## 8. 路径与运行数据
+- 简单事实：有一个可用来源即可停止；
+- 比较、研究、开放探索：默认至少两轮，以便经历一次反馈和查询调整；
+- 每个子问题期望至少两条证据，并考虑来源域多样性；
+- 连续两轮无新增来源时认为边际收益过低；
+- 达到 `max_rounds` 或 `max_sources` 时强制结束。
 
-- `config.json` 默认从启动工作目录解析；Web 入口显式把默认路径固定到仓库根。
-- `reports_dir` 和 `cache_dir` 的相对路径以 `config.json` 所在目录解析。
-- `deepsearch web` 和 `streamlit_app.py` 使用同一个仓库根，报告不会写入 `deepsearch/presentation/`。
-- secrets 只来自环境变量或 `.streamlit/secrets.toml`；`save_settings()` 始终把 `api_key` 写为空字符串。
-- 配置和缓存都使用临时文件替换，降低中断造成半文件的风险。
+每轮输入、结果数、新来源、抓取数、耗时、证据缺口、充分性判断和下一轮查询都写入 `RoundTrace`，供测试和界面展示。
 
-## 9. Streamlit 展示架构
+### 5.2 并发、去重与确定性
 
-`streamlit_app.py` 使用 `st.navigation(position="top")` 注册 `app_pages/` 下五个页面。入口统一初始化跨页面 Session State；页面是直接脚本，只组合 UI，不包装成大型渲染函数。
+研究搜索创建“搜索源 × 查询”的任务集合，最多使用 8 个线程。future 可以乱序完成，但结果按任务创建序号重组；候选再以分数、URL 和标题稳定排序。这样并发不会让相同测试输入产生随机报告结构。
 
-- `messages`、`last_result`、`progress_events`、`research_profile` 属于每个会话；
-- 研究通过 `st.status`/进度回调展示，结果以统一领域对象写入状态；
-- 只有报告目录扫描等可重复数据加载使用有界 `st.cache_data`；
-- 主题和配置通过 form 批量提交；API Key 不经过普通配置表单落盘；
-- 视觉 token 主要在 `.streamlit/config.toml`，必要的品牌增强集中在 `assets/app.css`。
+URL 去掉查询串、片段和尾部斜杠后作为跨来源去重键。同一 URL 命中多个查询时保留查询上下文。`per_domain_limit` 防止单一域名垄断有限来源预算。
 
-“研究”页允许配置领域、信息类型、时间窗口、文件格式、目标篇幅、读者、章节和自定义要求；“设置 → 自主任务”把同一组要求与每日/每周/单次周期组合。报告中心统一索引 `.md`、`.txt` 和 `.json`。
+### 5.3 正文抓取
 
-## 10. 自主任务架构
+`WebFetcher`：
 
-`ScheduledResearchTask` 同时保存调度规则、研究强度、`ResearchBrief`、是否投递 CustomerService 及数据密级。`ResearchTaskScheduler` 到期时创建对应强度的 Agent，重新执行完整研究循环；只有成功生成报告后才写入幂等状态。一个任务失败不会阻止同批次其他任务。
+- 响应体最多读取 2 MB，单来源正文默认最多保留 20,000 字符；
+- 优先用 `trafilatura` 提取主体，失败时使用标准库 HTMLParser 下限；
+- 跳过 script/style/nav/header/footer/form/aside 等模板区域；
+- 用 `pypdf` 读取公开、未加密 PDF 的前 80 页；
+- 单页失败不终止整批，保留搜索摘要和错误状态透明降级。
 
-- `daily`：每天到点一次；
-- `weekly`：在指定星期到点运行；
-- `once`：指定日期时间，错过时间后首次检查仍会补跑；
-- `schedule --once` 适合 Windows 任务计划程序或 cron；
-- `schedule --poll` 是个人电脑上的前台轻量轮询器。
+它不执行 JavaScript，不解密 PDF，也不绕过登录或访问控制。
 
-启用联动的任务在报告落盘后调用 `CustomerServicePublisher`。任务名生成稳定 `external_id`，内容哈希区分版本；网络错误、429 和 5xx 先做有界指数退避，仍失败则写入只含报告路径与哈希的 outbox。调度器后续轮询只重试投递，不重新执行研究。两类密钥只从环境变量或 Streamlit Secrets 读取，`save_settings()` 永不持久化它们。
+## 6. 报告生成与质量门
 
-## 11. 扩展方式
+### 6.1 三阶段模型
 
-| 需求 | 实现位置 | 核心循环是否修改 |
-|---|---|---|
-| 新搜索源 | 实现 `SearchProvider`，在 `bootstrap.py` 注册 | 否 |
-| 新正文读取器 | 实现 `SourceFetcher` | 否 |
-| SQLite/S3/向量存储 | 实现 `ReportStorage` | 否 |
-| HTML/PDF 输出 | 实现 `Reporter` | 否 |
-| 新质量模型 | 实现 `QualityEvaluatorPort` | 否 |
-| 领域化规划 | 实现/组合 `Planner` | 通常否 |
-| 后台任务与事件流 | 在展示入口外增加 job adapter | 应保持 ResearchService 不感知 Web |
+`MarkdownReporter` 使用同一个 `LanguageModel` 实例执行三次不同职责的请求，不是三个模型：
 
-## 12. 有意保留的边界
+1. 证据编辑器返回 `direct_answer`、claims、conflicts 和 gaps 的 JSON。
+2. 研究作者按 `ReportSpecification` 和来源上下文写结论优先初稿。
+3. 独立终稿编辑器返回 issues 和 `final_report` 的 JSON。
 
-项目当前是单机个人研究工具，不实现登录、多租户、数据库、分布式任务和浏览器自动化。下一阶段若生产化，应优先增加后台任务状态机、取消/恢复、claim-evidence graph、时效与蕴含校验，以及可重复的端到端评测集；不要把这些职责重新塞回 `ResearchService` 或页面脚本。
+每个来源最多向模型注入 4,000 字符，避免单页耗尽上下文。模型错误会保留具体阶段并转换为 `ReportQualityError`，不会在在线模式下回退到抽取式伪报告。确定性报告模板只用于显式 Mock 演示。
+
+### 6.2 模型协议和错误语义
+
+`OpenAICompatibleLLM` 请求：
+
+```text
+{base_url}/chat/completions
+```
+
+单次请求默认超时 180 秒。408、409、429、500、502、503、504、网络和超时错误最多重试一次；400/401/403/404 等确定性配置错误直接失败。服务端错误文本会限制长度并清除可能回显的 API Key。
+
+### 6.3 证据与确定性校验
+
+`CrossVerifier` 对来源前部文本切句并构造保守主题键。两个以上非 Mock 来源记录支持相似主张时标为多源；单来源标为待验证；同组数字口径不一致时提示核对，不自动裁决真伪。这里按来源记录计数，不能据此证明发布机构彼此独立。
+
+`AnswerValidator` 检查：
+
+- `[n]` 引用是否都存在于本次来源集合；
+- 结论和参考来源是否存在；比较、探索与深度研究还要求分析章节；
+- 计划子问题是否得到章节覆盖；
+- 详细论点与被引来源是否具有最低词项重叠；
+- 是否出现重复块或模板/导航噪声。
+
+来源清单由 `MarkdownReporter` 根据当前 `Source` 集合确定性补齐，不依赖模型记住排版要求。词项支持只能拦截明显张冠李戴，不能证明语义蕴含、来源时效或统计口径。
+
+### 6.4 质量评分
+
+`ResearchQualityEvaluator` 生成五个可解释维度：引用完整性、问题覆盖度、来源多样性、来源质量和检索健康度。Mock 完全排除在真实来源统计之外。评分在质量门通过后计算，是工程风险信号，不是事实正确率。
+
+## 7. 缓存与本地状态
+
+### 7.1 缓存
+
+`ResearchCache` 有两个 JSON 命名空间：
+
+- `search/`：搜索源 + 查询 + limit 的结果；
+- `pages/`：成功抓取的真实正文。
+
+默认 TTL 为 21,600 秒。键用 SHA-256 转为固定文件名，写入使用同目录临时文件替换。失败结果和 Mock 内容不缓存。`ResearchMetrics` 使用运行前后统计差值，避免复用 Agent 时展示累计命中。
+
+### 7.2 文件数据
+
+```text
+config.json                         普通配置和自动任务
+reports/                            已通过质量门的研究报告
+data/artifacts/                     搜索快照
+data/conversations/                 会话 JSON
+data/prompt-shortcuts.json          快捷输入
+data/trash/                         回收站资产与恢复元数据
+.cache/deepsearch/                  搜索和正文缓存
+.cache/customer-service-outbox/     投递失败记录
+.deepsearch-schedule-state.json     自动任务成功实例状态
+logs/deepsearch.log                 轮转日志
+```
+
+相对路径按配置文件目录解析，CLI 与 Web 都显式使用仓库根配置，避免在包目录产生第二套数据。
+
+### 7.3 会话最小化
+
+会话通过白名单保存消息字段：文本、模式、结果类型、资产路径、轻量来源元数据、问题摘要、轮次、停止原因、审校摘要、查询、警告和投递状态。密钥、任意附加字段和完整网页正文不会进入会话文件。
+
+从磁盘恢复研究时，只重建追问所需的最小 `ResearchResult`。由于来源正文为空，后续追问通常重新检索，避免把过时摘要误当成完整证据。
+
+## 8. 资料库与回收站状态
+
+`FileArtifactTrash` 只接受 `reports/` 和 `data/artifacts/` 中的 `.md/.txt/.json`：
+
+1. 移动前解析真实路径并检查允许目录；
+2. 资产移入 `data/trash/`，旁边写入原路径和移入时间元数据；
+3. 元数据写失败时回滚文件移动；
+4. 恢复前再次校验资产、元数据和目录，不覆盖同名文件；
+5. 永久删除仅针对已通过同一校验的条目。
+
+资料库页面的下拉框状态由当前报告集合参与键值计算。文件集合变化时组件重建，从根源上避免已删除报告继续显示；同时清除会话里的失效资产引用。资料库的手动推送会在会话索引中回查资产路径：找到来源会话时复用首页的 external ID；没有会话来源的手工文件则使用路径摘要形成稳定的 library ID。
+
+## 9. CustomerService 投递
+
+搜索快照、研究报告和自动任务报告统一转换为 `DeliveryArtifact`。`CustomerServicePublisher`：
+
+- 用稳定 external ID 和 SHA-256 内容哈希实现幂等身份；
+- 每次真正发送前重新读取文件并复核内容哈希；
+- 仅在联动启用后工作；未启用不会创建失败记录；
+- 按 v2 异步协议提交，保存 `job_id` 并轮询该 external ID 的版本状态；
+- 只有远端状态为 `succeeded` 且存在字符串 `document_id` 时才返回 `indexed`；
+- 失败 outbox 只存路径、哈希、重试信息和非敏感元数据，不复制正文或密钥；
+- 重试只做投递，不重新执行昂贵研究；
+- 408/425/429 和 5xx 可自动重试，其他 4xx 默认需修正配置后强制重试。
+
+接口时序为：
+
+```text
+POST {base_url}/api/v2/integrations/deepsearch/documents
+  -> HTTP 202 { job_id, external_id, status, content_hash }
+GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
+  -> versions[] 中对应 job_id 的 queued/running/succeeded/failed
+```
+
+`CustomerServiceSettings.request_timeout` 同时约束单次 HTTP 请求和页面等待本次异步入库的总时长。等待超时表示接收端已经受理但尚未确认完成；记录仍进入 outbox，后续依靠 external ID 与内容哈希安全重投。
+
+## 10. 自动任务
+
+`ScheduledResearchTask` 支持 daily、weekly、once，并把完整 `ResearchBrief` 和投递规格写入配置。`ResearchTaskScheduler`：
+
+- 使用当前本地时区判断到期；
+- 只有研究成功才写入计划实例的 occurrence key；
+- 单任务失败不会阻断其他到期任务；
+- 投递失败不会让调度器重新执行研究；
+- 是前台轮询循环，进程退出后没有后台服务。
+
+`TopicManager` 和 `TopicScheduler` 仅保留为旧导入兼容别名。
+
+## 11. 配置与密钥
+
+`load_settings()` 的优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入模型、Brave 和联动凭据。
+
+`save_settings()` 使用进程内锁、临时文件和原子替换。模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。
+
+模型超时与网页超时是独立参数：
+
+- `Settings.request_timeout`：搜索和抓取，默认 8 秒；
+- `LLMSettings.request_timeout`：每次模型请求，默认 180 秒。
+
+## 12. 扩展点
+
+| 需求 | 实现方式 |
+|---|---|
+| 新搜索源 | 实现 `SearchProvider`，在组合根注册 |
+| 新正文读取器 | 实现 `SourceFetcher` |
+| 新路由策略 | 扩展或替换 `IntentClassifier` |
+| 新规划/停止策略 | 实现 `Planner` |
+| 新报告生成器 | 实现 `Reporter`，继续接受结构化来源和计划 |
+| 新质量规则 | 扩展 `AnswerValidator` 或实现 `QualityEvaluatorPort` |
+| 新存储 | 实现 `ReportStorage` 或独立 Artifact adapter |
+| 新投递目标 | 复用 `DeliveryArtifact`，增加 publisher |
+| 可恢复后台任务 | 保留 `AgentRequest`、`RoundTrace` 和质量门，外接持久状态机 |
+
+## 13. 必须保持的不变量
+
+- 在线路径永远不能静默混入 Mock。
+- 研究缺少模型时必须在任何检索前失败。
+- 不通过质量门的报告不得保存或投递。
+- 会话、配置和 outbox 不得持久化密钥或完整网页正文。
+- 并发完成顺序不得影响稳定排序和来源编号。
+- 页面、CLI、自动任务必须复用统一 Agent 和领域对象。
+- 资产恢复不得覆盖已有文件，永久删除必须限制在项目回收站内。

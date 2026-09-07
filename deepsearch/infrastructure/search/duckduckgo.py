@@ -28,7 +28,7 @@ class DuckDuckGoSearch(SearchProvider):
 
         request = urllib.request.Request(
             self.endpoint,
-            data=urllib.parse.urlencode({"q": query}).encode(),
+            data=urllib.parse.urlencode({"q": query, "kp": "-1"}).encode(),
             headers={"User-Agent": "Mozilla/5.0 DeepSearch/1.0", "Accept": "text/html"},
         )
         try:

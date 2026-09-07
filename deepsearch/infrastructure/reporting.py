@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 
 from .llm import LanguageModel
-from ..application.prompts import REPORT_SYSTEM, REPORT_USER
+from ..application.errors import ReportQualityError
+from ..application.prompts import (
+    DRAFT_SYSTEM,
+    DRAFT_USER,
+    EVIDENCE_SYSTEM,
+    EVIDENCE_USER,
+    REPAIR_SYSTEM,
+    REPAIR_USER,
+    REVIEW_SYSTEM,
+    REVIEW_USER,
+)
 from ..application.verification import source_table
 from ..domain.models import Confidence, EvidenceGroup, QuestionType, RoundTrace, SearchPlan, Source
 
 
 class MarkdownReporter:
-    """先综合结论，再给证据与来源；LLM 不可用时仍输出完整总结。"""
+    """先综合结论，再给证据与来源；确定性模板仅供显式演示模式使用。"""
 
     def __init__(self, llm: LanguageModel | None = None) -> None:
         self.llm = llm
+        self.last_review_summary: tuple[str, ...] = ()
+        self._progress = lambda phase, message: None
+
+    def set_progress(self, callback) -> None:
+        self._progress = callback
 
     def generate(
         self,
@@ -26,24 +42,37 @@ class MarkdownReporter:
         rounds: int,
         trace: list[RoundTrace] | None = None,
     ) -> str:
-        """按研究要求生成报告；模型失败时回退到证据驱动的确定性综合。"""
+        """按研究要求生成报告；模型失败时明确中止，不生成伪报告。"""
 
         trace = trace or []
+        self.last_review_summary = ()
         if self.llm is not None:
             # 每个来源最多注入 4000 字符，避免单页吞噬全部模型上下文。
             source_context = "\n\n".join(
                 f"[{source.source_id}] {source.title}\nURL: {source.url}\n{source.usable_text[:4000]}"
                 for source in sources
             )
-            trace_context = "\n".join(
-                f"第 {item.round_number} 轮：查询={'; '.join(item.queries)}；判断={item.decision}；下一步={'; '.join(item.next_queries) or '停止'}"
-                for item in trace
-            ) or "无结构化轨迹"
             specification = plan.brief.report
+            stage = "准备模型输入"
             try:
-                body = self.llm.generate(
-                    REPORT_SYSTEM,
-                    REPORT_USER.format(
+                stage = "证据整理"
+                self._progress("evidence_map", "正在把来源整理为结论、引用、冲突与证据缺口…")
+                evidence_raw = self.llm.generate(
+                    EVIDENCE_SYSTEM,
+                    EVIDENCE_USER.format(
+                        question=plan.question,
+                        objective=plan.brief.objective,
+                        subquestions="；".join(plan.subquestions),
+                        sources=source_context,
+                    ),
+                )
+                evidence_map = self._parse_json(evidence_raw, "证据整理")
+                evidence_text = json.dumps(evidence_map, ensure_ascii=False, indent=2)
+                stage = "初稿生成"
+                self._progress("draft", "正在按结论优先的结构生成初稿…")
+                draft = self.llm.generate(
+                    DRAFT_SYSTEM,
+                    DRAFT_USER.format(
                         question=plan.question,
                         objective=plan.brief.objective,
                         domain=plan.brief.domain,
@@ -54,27 +83,94 @@ class MarkdownReporter:
                         target_words=specification.target_words,
                         sections="、".join(specification.sections),
                         custom_instructions=specification.custom_instructions or "无",
-                        subquestions="；".join(plan.subquestions),
-                        rounds=rounds,
-                        trace=trace_context,
+                        evidence_map=evidence_text,
                         sources=source_context,
                     ),
                 )
+                stage = "独立审校"
+                self._progress("review", "正在独立检查直接性、重复、引用和排版并重写…")
+                reviewed_raw = self.llm.generate(
+                    REVIEW_SYSTEM,
+                    REVIEW_USER.format(
+                        question=plan.question,
+                        evidence_map=evidence_text,
+                        sources=source_context,
+                        draft=draft,
+                    ),
+                )
+                reviewed = self._parse_json(reviewed_raw, "独立审校")
+                body = str(reviewed.get("final_report", "")).strip()
+                if not body:
+                    raise ReportQualityError("独立审校没有返回终稿")
+                self.last_review_summary = tuple(
+                    str(item) for item in reviewed.get("issues", []) if str(item).strip()
+                )
                 return self._ensure_header(body, plan, sources, rounds)
-            except Exception:
-                # 模型异常不能浪费已完成的检索、阅读和交叉验证。
-                pass
+            except ReportQualityError:
+                raise
+            except Exception as exc:
+                detail = str(exc).strip() or type(exc).__name__
+                raise ReportQualityError(f"三阶段报告生成失败（{stage}）：{detail}") from exc
         return self._deterministic_report(plan, sources, evidence, conflicts, rounds, trace)
+
+    def revise(self, report: str, issues: list[str], plan: SearchPlan, sources: list[Source]) -> str:
+        """确定性校验失败时执行唯一一次有针对性的模型修订。"""
+
+        if self.llm is None:
+            return report
+        source_context = "\n".join(
+            f"[{source.source_id}] {source.title} | {source.url} | {self._excerpt(source.usable_text, 800)}"
+            for source in sources
+        )
+        repaired = self.llm.generate(
+            REPAIR_SYSTEM,
+            REPAIR_USER.format(
+                question=plan.question,
+                issues="；".join(issues),
+                sources=source_context,
+                report=report,
+            ),
+        ).strip()
+        if not repaired:
+            raise ReportQualityError("模型没有返回修订后的报告")
+        self.last_review_summary = (*self.last_review_summary, "已根据确定性校验结果完成一次针对性修订")
+        # 来源索引来自系统已经掌握的 Source，而不是模型推断；即使模型在
+        # 修订时误删来源表，也应由确定性代码恢复可追溯清单。
+        return self._ensure_sources(repaired, sources)
+
+    @staticmethod
+    def _parse_json(value: str, stage: str) -> dict:
+        clean = value.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean, flags=re.I | re.S)
+        try:
+            parsed = json.loads(clean)
+        except json.JSONDecodeError as exc:
+            raise ReportQualityError(f"{stage}没有返回有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ReportQualityError(f"{stage}返回格式不是 JSON 对象")
+        return parsed
 
     @staticmethod
     def _ensure_header(body: str, plan: SearchPlan, sources: list[Source], rounds: int) -> str:
         if body.lstrip().startswith("# "):
-            return body.strip() + "\n"
-        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
-        return (
-            f"# {plan.question}\n\n> 生成时间：{timestamp}\n"
-            f"> 搜索轮次：{rounds} 轮 | 有效来源：{len(sources)} 个\n\n{body.strip()}\n"
-        )
+            report = body.strip()
+        else:
+            timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+            report = (
+                f"# {plan.question}\n\n> 生成时间：{timestamp}\n"
+                f"> 搜索轮次：{rounds} 轮 | 有效来源：{len(sources)} 个\n\n{body.strip()}"
+            )
+        return MarkdownReporter._ensure_sources(report, sources)
+
+    @staticmethod
+    def _ensure_sources(report: str, sources: list[Source]) -> str:
+        """用已知来源确定性补齐清单，避免终稿因模型漏排版而整体丢弃。"""
+
+        normalized = report.strip()
+        if "## 参考来源" not in normalized and "## 全部来源" not in normalized:
+            normalized += "\n\n" + source_table(sources, heading="参考来源")
+        return normalized + "\n"
 
     def _deterministic_report(
         self,
@@ -104,7 +200,7 @@ class MarkdownReporter:
             f"> 研究领域：{plan.brief.domain} | 信息类型：{'、'.join(plan.brief.information_types)} | 时间范围：{plan.brief.time_scope}",
             f"> 交付要求：{specification.output_format} · 约 {target_words} 字 · 面向{specification.audience}",
             "",
-            "## 摘要",
+            "## 结论",
             "",
         ]
 
@@ -114,14 +210,14 @@ class MarkdownReporter:
                 direct = claims[: min(2, len(claims))]
                 lines.append("综合现有证据，" + " ".join(self._claim_text(*item[:2]) for item in direct))
             else:
-                lines.append(f"围绕“{plan.question}”，现有证据支持以下综合结论：")
+                lines.append(f"围绕“{plan.question}”，演示证据支持以下结论：")
                 lines.append("")
                 for index, (statement, ids, _) in enumerate(claims[:4], 1):
                     lines.append(f"- **发现 {index}**：{statement} {self._citations(ids)}")
         else:
             lines.append("当前没有获得可用证据，不能形成可靠总结。请恢复网络、调整搜索源或扩大研究预算后重试。")
 
-        lines.extend(["", "## 关键结论", ""])
+        lines.extend(["", "## 关键发现", ""])
         if claims:
             for index, (statement, ids, confidence) in enumerate(claims[:5], 1):
                 lines.append(
@@ -131,7 +227,7 @@ class MarkdownReporter:
         else:
             lines.append("1. 证据不足，当前不能给出负责任的事实结论。")
 
-        lines.extend(["", "## 详细分析", ""])
+        lines.extend(["", "## 分析", ""])
         for index, subquestion in enumerate(plan.subquestions, 1):
             # 子问题都含原问题前缀；移除公共部分，避免“成本”等主问题词污染所有章节的证据排序。
             focus = subquestion.replace(plan.question, "", 1).strip("：: ")
@@ -145,7 +241,8 @@ class MarkdownReporter:
                 lines.append("")
                 for source in selected:
                     lines.append(f"- **{source.title}**：{self._excerpt(source.usable_text)} [{source.source_id}]")
-                confidence = Confidence.VERIFIED if len({item.url for item in selected}) >= 2 else Confidence.SINGLE
+                independent = {item.url for item in selected if item.provider != "mock"}
+                confidence = Confidence.VERIFIED if len(independent) >= 2 else Confidence.SINGLE
                 lines.extend(["", f"**本节可信度**：{confidence.value}（{len(selected)} 条可追溯证据）", ""])
             else:
                 lines.extend(["尚无充分证据，不能可靠作答。", "", f"**本节可信度**：{Confidence.SINGLE.value}（0 条证据）", ""])
@@ -160,29 +257,14 @@ class MarkdownReporter:
                 )
             lines.append("")
 
-        lines.extend(["## 建议与下一步", ""])
-        recommendations = self._recommendations(plan, sources, conflicts, trace)
-        lines.extend(f"- {item}" for item in recommendations)
-
-        lines.extend(["", "## 证据局限与存在争议的信息", ""])
+        lines.extend(["", "## 局限", ""])
         if mocked:
             lines.append("- 本报告包含 Mock 模拟来源，只能验证 Agent 工作流与报告结构，不能替代实时事实调研。")
         if any(not source.fetched and source.provider != "mock" for source in sources):
             lines.append("- 部分页面只取得搜索摘要，关键决策前应打开原文核对上下文。")
         lines.extend([f"- {item}" for item in conflicts] or ["- 当前来源中未自动识别出明确数字冲突；这不代表不存在时间或统计口径差异。"])
 
-        lines.extend(["", "## 研究过程", ""])
-        if trace:
-            lines.extend(["| 轮次 | 查询策略 | 新增来源 | 充分性评估 | 后续动作 |", "|---:|---|---:|---|---|"])
-            for item in trace:
-                queries = "；".join(item.queries[:3]).replace("|", "/")
-                decision = item.decision.replace("|", "/")
-                action = ("停止并生成报告" if item.sufficient else "；".join(item.next_queries[:2]) or "达到预算后停止").replace("|", "/")
-                lines.append(f"| {item.round_number} | {queries} | {item.new_sources} | {decision} | {action} |")
-        else:
-            lines.append(f"完成 {rounds} 轮研究；当前结果未包含结构化轮次轨迹。")
-
-        known_sections = {"摘要", "关键结论", "详细分析", "建议与下一步", "证据局限与争议", "证据局限与存在争议的信息", "研究过程", "全部来源"}
+        known_sections = {"结论", "关键发现", "分析", "局限", "参考来源", "全部来源"}
         for section in specification.sections:
             if section.strip() and section.strip() not in known_sections:
                 lines.extend(["", f"## {section.strip()}", ""])
@@ -192,16 +274,7 @@ class MarkdownReporter:
                 else:
                     lines.append("当前没有足够证据填充此自定义章节。")
 
-        if specification.custom_instructions:
-            lines.extend([
-                "",
-                "## 报告要求执行情况",
-                "",
-                f"- 自定义要求：{specification.custom_instructions}",
-                f"- 本报告以约 {target_words} 字为篇幅目标；确定性降级模式优先保证引用完整和章节覆盖。",
-            ])
-
-        lines.extend(["", source_table(sources), ""])
+        lines.extend(["", source_table(sources, heading="参考来源"), ""])
         return "\n".join(lines)
 
     def _claims(

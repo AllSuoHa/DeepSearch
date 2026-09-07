@@ -6,7 +6,9 @@ __pycache__/
 .cache/
 .coverage
 .env
+config.json
 .streamlit/secrets.toml
 reports/*.md
 !reports/.gitkeep
+data/
 logs/

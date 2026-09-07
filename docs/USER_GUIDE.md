@@ -1,290 +1,315 @@
-# DeepSearch 2.1 用户手册
+# DeepSearch 2.2 用户手册
 
-> 适用于当前 CLI 与 Streamlit 工作台 · 最后校准：2026-08-28
+> 适用版本：2.2.0 · 最后校准：2026-09-07
 
-## 1. 安装与第一次运行
+## 1. 安装与启动
 
-DeepSearch 要求 Python 3.11 或更高版本。
+要求 Python 3.11 或更高版本。Windows PowerShell：
 
 ```powershell
 cd D:\code\pycharm\DeepSearch
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-deepsearch --mock ask "Python 3.13 有哪些新特性"
+Copy-Item config.example.json config.json
+deepsearch web
 ```
 
-第一次建议使用 `--mock`：它完全不访问网络或模型，能快速确认安装、研究循环、引用、验证和报告保存都正常。默认报告目录为项目根 `reports/`。
+默认地址为 `http://localhost:8501`。如果只运行应用，不需要测试工具，可安装 `.[ui]`。
 
-只安装 CLI：
+显式离线演示：
 
 ```powershell
-python -m pip install -e .
+deepsearch --mock web
 ```
 
-安装 Web UI：
+演示模式不访问网络，也不需要模型密钥；所有 Mock 内容都会明确标识，不能当作事实来源。
 
-```powershell
-python -m pip install -e ".[ui]"
-```
+## 2. 第一次使用
 
-## 2. CLI 提问
+1. 打开“设置 → 搜索”，确认数据来源是“在线”；没有 Brave Key 也能使用免费来源。
+2. 只找链接或资源时，可直接回到“对话”并选择“搜索”。
+3. 需要研究报告时，在“设置 → 研究模型”确认模型状态为“模型可用”。
+4. 在输入区选择“智能判断”“搜索”或“研究”，输入问题后发送。
+5. 完成后可下载、复制、继续追问、切换模式重跑或推送结果。
 
-```powershell
-deepsearch ask "AI 对高等教育的影响、风险和实践案例"
-deepsearch --mock ask "对比主流 Agent 框架" --no-stream
-python -m deepsearch --mock ask "Python 3.13 什么时候发布"
-```
+## 3. 如何选择模式
 
-参数位置规则：
+### 智能判断
 
-- `--mock`、`--config` 是全局参数，放在 `ask`、`interactive` 等子命令之前；
-- `--no-stream` 属于 `ask`，放在问题之后；
-- `--no-stream` 只隐藏完整报告输出，不会关闭进度或文件保存。
+系统用可解释关键词做低成本路由：
 
-进度阶段：
+- “链接、官网、资源、哪里看、下载、找一下”等请求倾向搜索；
+- “论文、比较、研究、调研、综述、报告、分析”等请求倾向研究；
+- 两类信号相同或没有明显信号时，选择成本较低的搜索。
+
+智能判断不会覆盖用户的显式选择。
+
+### 搜索
+
+适合：
+
+- 找官方网站、产品文档、代码仓库或网页入口；
+- 找影视作品的正规播放平台和官方信息；
+- 找论文、期刊或 DOI 的入口；
+- 快速浏览多个来源，不需要长报告。
+
+搜索会补充必要的中英文查询，并发调用搜索源，再执行 URL 校验、盗版/恶意下载过滤、去重、资源分类和风险标记。结果是简短答案加可点击卡片，不包含研究报告的“结论/分析/局限”套式章节。
+
+### 研究
+
+适合：
+
+- 比较技术、产品或方案；
+- 做文献综述、行业调研或决策分析；
+- 需要正文阅读、跨来源综合、引用和局限说明；
+- 希望产出可保存、可投递的结构化报告。
+
+在线研究必须配置模型。系统先规划问题，再根据证据充分性进行一到多轮检索；简单问题可能一轮停止，复杂问题通常至少两轮，但仍受研究强度和来源预算约束。
+
+## 4. 对话工作台
+
+### 快捷输入
+
+首页空状态提供默认快捷输入。悬浮可查看完整内容；点击只把模板放入输入框，不会立刻搜索或调用模型。通过“管理快捷输入”可以新增、修改或删除，最多保存 20 条。
+
+### 高级选项
+
+高级选项主要影响研究流程：
+
+| 选项 | 作用 |
+|---|---|
+| 研究强度 | 快速减少预算，均衡使用默认值，深度扩大轮次、来源和单查询结果数 |
+| 知识领域 | 给规划和查询提供领域上下文 |
+| 信息类型 | 决定是否追加新闻、公告、研究、论文等搜索方向 |
+| 时间范围 | 把时效要求带入查询与报告约束 |
+| 地区 | 给支持地区上下文的搜索源使用 |
+| 目标篇幅/读者 | 控制报告表达方式和长度目标 |
+| 报告章节 | 指定希望保留的主要章节 |
+| 补充要求 | 例如“区分事实与判断”“优先给可执行建议” |
+
+### 运行和停止
+
+运行状态默认折叠，标题显示当前阶段和累计用时。研究计算在有限后台线程池中执行，页面线程对齐任务启动时间每秒更新一次，因此没有新阶段事件时计时也会按 0、1、2… 秒连续变化；阶段变化会立即刷新，不必等待下一秒。
+
+展开状态中的“思考步骤与说明”会列出准备任务、制定计划、搜索来源、读取正文、评估证据、交叉验证、整理证据、生成初稿、审校报告、验证报告等实际经过的高层步骤。每步都有最新说明和独立用时；补充检索等真实循环可以再次出现。这里展示的是可审计的任务阶段，不是模型隐性思维链。
+
+输入区会在运行时出现“停止生成”按钮。任务成功或失败后，页面会立即清除这个按钮；聊天输入自身在脚本结束后恢复正常提交状态。停止仍是协作式取消：系统会在下一个阶段边界中止后台任务，但若程序正阻塞在一次 HTTP 调用中，需要等该调用返回或超时后才能观察到停止信号。未完成内容不会保存为正式资产。
+
+最终研究报告不使用 token 级流式输出。它必须先完成证据整理、初稿、独立审校和确定性质量门，校验通过后才一次性展示；这样不会把尚未审校或最终会被拒绝的文本提前呈现给用户。运行过程仍会通过每秒计时和阶段说明实时反馈。
+
+### 页面滚动
+
+首页输入栏上方右侧有回顶和到底两个悬浮按钮，默认保持隐藏。鼠标滚轮作用于主内容区时，当前可用方向的按钮会淡入；停止滚动约 1.4 秒后自动淡出。页面顶部不显示回顶、底部不显示到底，没有可滚动内容时两者都不出现。点击按钮使用可被滚轮即时取消的短平滑动画，因此到达底部后第一下反向滚轮就能接管页面，不会先被尚未结束的原生平滑滚动吞掉。移动端按钮会提高位置，避免遮挡可能换行的输入工具栏。按钮不触发 Python rerun，也不会改变会话数据。
+
+### 继续追问
+
+结果操作区可以针对当前结果继续追问：
+
+- 研究追问与既有证据高度相关且不要求最新信息时，可以复用当前证据；
+- 包含“最新、当前、新闻、更新、数据”等时效信号，或已有证据覆盖不足时，会重新进入研究循环；
+- 从磁盘恢复的会话只保留轻量来源元数据，不保留完整网页正文，因此研究追问通常需要重新检索。
+
+## 5. 阅读结果
+
+### 搜索结果卡片
+
+卡片显示标题、域名、检索源、摘要、资源类型、发布时间和风险标签。主要标签含义：
 
 | 标签 | 含义 |
 |---|---|
-| `PLAN` | 分类、拆解和初始搜索策略 |
-| `SEARCH` | 并发执行查询和搜索源 |
-| `FETCH` | 并发抓取正文，失败时保留摘要 |
-| `CHECK` | 判断证据是否充分以及停止原因 |
-| `RETRY` | 根据缺失维度生成下一轮查询 |
-| `VERIFY` | 组织证据和提示可能冲突 |
-| `WRITE` | 综合直接答案、关键结论、详细分析和建议 |
-| `VALIDATE` | 校验引用、结构、覆盖和文本对应 |
-| `SAVED` | 显示报告路径 |
-| `INFO` | 当前实现中未单列标签的事件，例如质量评分 |
+| 可信来源 | 已知官方、正规平台或可信学术入口 |
+| 普通网页 | 社区、聚合页或一般网页线索 |
+| 未验证 | 系统无法确认来源身份或质量，需要用户核对 |
+| 谨慎访问 | 页面含下载、短链或跳转等风险信号 |
 
-复杂问题通常至少两轮；事实问题可一轮停止。最大轮次是预算上限，不是每次必须执行的固定次数。
+影视搜索优先展示正规播放平台，其次是官方信息、社区与普通网页。地区版权、订阅状态和实际上架情况必须以平台页面为准。
 
-## 3. Web 研究工作台
+### 研究报告
 
-```powershell
-deepsearch web
-# 指定端口
-deepsearch web --port 8502
-# 等价的开发启动方式
-python -m streamlit run streamlit_app.py
-```
+研究模式使用同一个已配置模型连续完成三个阶段：
 
-默认访问 `http://localhost:8501`。请从项目根目录运行直接 Streamlit 命令；`deepsearch web` 会自动使用正确的仓库根。
+1. **证据整理**：从已抓取正文和摘要中提取直接答案、主张、引用、冲突和缺口。
+2. **初稿生成**：按目标读者、篇幅和章节生成结论优先 Markdown。
+3. **独立审校**：检查直接性、重复、证据支持和排版，并输出重写后的终稿。
 
-### 页面说明
+之后程序执行确定性质量门，检查引用编号、来源表、章节覆盖、详细论点的词项支持、重复块和模板噪声。来源清单由系统根据本次真实来源确定性补齐；简单事实题不强制扩写“分析”，复杂问题仍要求分析章节。首次不通过时只允许一次针对性修订；仍不合格则报告失败，不保存也不推送。
 
-| 页面 | 用途 |
+报告后的“证据详情与审校”折叠区包含来源数、轮次、审校摘要、五维质量分和检索轨迹。它不会显示或保存模型的隐性思维链。
+
+质量分用于暴露工程风险，不是事实真实性概率。即使显示“可靠”，关键决策仍应打开原始来源核验。
+
+## 6. 会话、资料库与回收站
+
+### 会话
+
+- 首次发送消息后自动创建会话；侧栏展示最近 6 条。
+- “全部记录”支持标题搜索、分页、继续对话和二次确认删除。
+- 删除会话会永久删除对应 JSON，但不会删除报告或搜索快照。
+- 会话保存消息、工作模式、轻量来源元数据、资产路径和投递状态，不保存密钥或完整网页正文。
+
+### 资料库
+
+资料库同时扫描：
+
+- `data/artifacts/` 中的搜索 Markdown 快照；
+- `reports/` 中的 Markdown、Text、JSON 研究报告。
+
+支持按文件名或正文搜索、预览、下载和推送。选择资产后，操作栏的“推送”按钮可以设置 `public`、`internal` 或 `confidential` 密级并发送到 CustomerService；未启用联动时会引导到设置页。若该资产来自会话，资料库会复用首页相同的投递身份，重复推送不会创建第二份知识库文档。“移到回收站”需要确认，完成后会清除会话中的失效资产路径，但保留会话文字和来源摘要。
+
+报告集合发生变化时，选择器会同步重建。删除当前报告后，如果还有其他报告，会自动切换到现存项；如果列表为空，则显示空状态，不会继续展示已删除标题。
+
+### 回收站
+
+回收站位于 `data/trash/`，记录原路径和移入时间：
+
+- 恢复时会创建原目录，但不会覆盖原位置的同名文件；
+- 永久删除只针对经过目录和元数据双重校验的当前条目；
+- 永久删除需要再次确认，完成后无法撤销；
+- 元数据损坏、资产缺失或路径超出允许目录的条目不会显示为可操作项。
+
+## 7. 下载、复制和 CustomerService
+
+搜索快照与研究报告都必须先落盘，才能显示结果操作区。
+
+- **下载**：按当前资产格式下载。
+- **复制**：在只读 Markdown 代码框右上角复制。
+- **切换模式重跑**：使用原问题改走搜索或研究。
+- **推送**：把现有资产发送到 CustomerService，不重复执行搜索或研究。
+
+启用联动需要：
+
+1. 在“设置 → 知识库联动”填写 CustomerService **API 根地址**并启用，默认 `http://127.0.0.1:8000`，不要填写 Streamlit 页面端口；
+2. 在 DeepSearch 的 `.streamlit/secrets.toml` 配置 `DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY`；
+3. 在 CustomerService 的 `.env` 配置值完全相同的 `DEEPSEARCH_INTEGRATION_KEY`；
+4. 如目标服务还要求 Bearer 凭据，再配置 `DEEPSEARCH_CUSTOMER_SERVICE_API_KEY`；
+5. 修改 Secrets 后重启 DeepSearch，再使用 `public` 或 `internal` 文档验证。
+
+联动未启用或缺少本地密钥时，页面会直接显示配置提示，不发送请求。正常推送先收到 CustomerService v2 的 `202 + job_id`，随后等待后台任务成为 `succeeded`；页面不会再把“已排队”误报为“已入库”。连接、密钥、接口版本、文档策略、后台任务失败和等待超时都会显示具体原因。outbox 只保存资产路径、内容哈希和非敏感元数据；重试投递前会复核哈希，防止排队期间文件被替换。
+
+常见提示：
+
+| 页面提示 | 应检查的项目 |
 |---|---|
-| **首页** | 产品定位、研究流程、系统状态和推荐问题 |
-| **研究** | 选择研究强度、提交问题、实时查看阶段、阅读报告和追问 |
-| **证据** | 五维评分、来源列表、轮次轨迹、停止原因和正文预览 |
-| **报告** | 搜索、阅读和下载根 `reports/` 中的 Markdown/Text/JSON 资产 |
-| **设置** | 配置引擎预算、缓存、自主任务和模型状态 |
-
-### 三档研究强度
-
-| 模式 | 预算 | 推荐场景 |
-|---|---|---|
-| 快速 | 1 轮、8 来源、每查询 3 候选 | 单一事实、快速验证 |
-| 均衡 | 沿用 `config.json`，默认 3 轮/16 来源 | 常规分析 |
-| 深度 | 4 轮、28 来源、每查询 6 候选 | 复杂对比、技术选型 |
-
-模式只影响当前研究，不会改写持久化配置。
-
-研究页的“报告与研究要求”还可设置：知识领域、新闻/公告/研究等信息类型、时间范围、Markdown/Text/JSON、300–5000 字目标篇幅、目标读者、报告章节和自定义模板要求。这些字段会进入查询规划、报告生成和文件保存；不是只改变页面显示。
-
-## 4. 追问
-
-CLI 使用：
+| 缺少联动密钥 | DeepSearch `.streamlit/secrets.toml` 是否配置并已重启 |
+| 拒绝了联动密钥 | 两边密钥是否逐字一致 |
+| v2 联动接口不存在 | 地址是否误填为前端端口，CustomerService 是否为最新版 |
+| 尚未完成联动配置 | CustomerService `.env` 是否配置 `DEEPSEARCH_INTEGRATION_KEY` |
+| 拒绝此文档 | 演示模式不接受 `confidential`，或正文命中凭据特征检查 |
+| 已接收但未完成入库 | 到 CustomerService 的“入库任务”查看 worker 状态和错误 |
 
 ```powershell
-deepsearch --mock interactive
-```
-
-第一次输入执行完整研究；之后的输入视为对上一份结果的追问。新问题与已有报告词项重叠足够时复用原来源，不足时自动追加完整搜索。每次追问仍保存为独立报告。输入 `/quit` 或 `/exit` 结束。
-
-Web 研究页同样保留当前浏览器会话的最近结果。点击“开始新研究”会清空当前会话上下文，但不会删除历史报告或配置。
-
-当前追问是单会话、上一结果优先，不是长期记忆或跨报告知识库。
-
-## 5. 在线搜索与模型配置
-
-在线检索不要求模型 Key。默认同时使用 DuckDuckGo 和 Wikipedia；两者都无结果时自动切换到带明显标识的 Mock 来源。
-
-兼容模型使用 `/chat/completions`：
-
-```powershell
-$env:DEEPSEARCH_API_KEY = "..."
-$env:DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"
-$env:DEEPSEARCH_MODEL = "gpt-4o-mini"
-deepsearch ask "你的问题"
-```
-
-Web 可复制：
-
-```powershell
-Copy-Item .streamlit\secrets.toml.example .streamlit\secrets.toml
-```
-
-再编辑真实 `secrets.toml`。该文件已被 `.gitignore` 排除。普通设置保存会强制清空 `api_key`，但仍不要把密钥写入 `config.json`。
-
-模型缺失时使用确定性报告器；调用错误或超时会重试一次，再降级，不丢失已获取证据。
-
-## 6. 配置文件
-
-```powershell
-Copy-Item config.example.json config.json
-deepsearch --config .\config.json --mock ask "测试配置"
-```
-
-配置优先级：默认值 → JSON → 环境变量 → 命令/调用参数。相对的报告和缓存路径以配置文件所在目录为基准，而不是 Python 包目录。
-
-常调参数：
-
-- `mode`：`auto` 或 `mock`；
-- `max_rounds`：均衡模式最大轮次；
-- `results_per_query`、`max_sources`：候选与来源预算；
-- `request_timeout`、`fetch_workers`：网络超时和抓取并发；
-- `cache_enabled`、`cache_ttl_seconds`：缓存开关和 TTL；
-- `per_domain_limit`：降低单站点垄断；
-- `reports_dir`、`cache_dir`：运行数据路径；
-- `log_level`：默认 `INFO`。
-
-完整字段和默认值见根 [README](../README.md)。
-
-## 7. 历史报告
-
-```powershell
-deepsearch history
-deepsearch history --query "大模型"
-```
-
-结果按新到旧排列，查询匹配文件名和 Markdown 正文。Web“报告”页可搜索、预览和下载同一目录的文件。
-
-每份报告通常包含元信息、摘要、详细分析、可信度与争议信息、全部来源表。生成报告是运行产物；版本升级不会批量改写历史内容。
-
-## 8. 自主研究任务
-
-```powershell
-deepsearch tasks add "AI 日报" "总结大模型与 Agent 领域的重要变化" `
-  --time 10:00 `
-  --schedule-type daily `
-  --domain "人工智能与大模型" `
-  --types "新闻,公告,研究" `
-  --time-scope "最近 24 小时" `
-  --format markdown `
-  --words 1800 `
-  --audience "技术负责人" `
-  --sections "摘要,重大事件,技术进展,行业影响,建议与下一步" `
-  --instructions "按重要性排序，区分事实、判断和建议" `
-  --profile 深度 `
-  --deliver-to-customer-service `
-  --classification internal
-
-deepsearch tasks list
-deepsearch tasks disable "AI 日报"
-deepsearch tasks enable "AI 日报"
-deepsearch --mock tasks run "AI 日报"
-deepsearch tasks remove "AI 日报"
-```
-
-周期类型：
-
-- `daily`：每天指定时间；
-- `weekly`：通过 `--weekdays "0,2,4"` 选择周一、周三、周五；
-- `once`：通过 `--date 2026-09-01` 指定单次日期；
-- 旧 `topics` 命令仍可使用，但新项目推荐 `tasks`。
-
-任务配置会真正进入 Agent：领域、信息类型和时间窗口会加入查询；篇幅、读者、章节和模板要求会进入报告器；文件格式决定最终保存为 `.md`、`.txt` 或 `.json`。
-
-如果使用 `--deliver-to-customer-service`，还要在 `config.json` 的 `customer_service.enabled` 开启全局联动，并通过环境变量提供：
-
-```powershell
-$env:DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "与 CustomerService 一致的专用密钥"
-$env:DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "可选：CustomerService 全局 API Key"
-```
-
-Web 端可在“设置 → 知识库联动”完成普通配置，并在单个任务中勾选自动提交。投递失败不会重新搜索；报告路径、内容哈希和非敏感元数据会写入 `.cache/customer-service-outbox`，调度器后续轮询会指数退避重试。报告正文不会复制到 outbox。`confidential` 默认会被 CustomerService 拒绝，除非接收端显式允许。
-
-```powershell
-# 查看失败原因、报告路径和下次重试时间（不显示正文或密钥）
 deepsearch delivery list
-
-# 修正密钥、URL 或 confidential 接收策略后，强制重试原本不可自动重试的 4xx 记录
+deepsearch delivery retry
 deepsearch delivery retry --force
 ```
 
-运行调度器：
+`--force` 也会重试 4xx 等默认判定为不可自动重试的记录，请先确认配置已经修正。
+
+## 8. 自动任务
+
+Web 的“自动任务”页和 CLI 都支持 daily、weekly、once：
 
 ```powershell
-# 检查一次所有到期且尚未成功执行的任务
+deepsearch tasks add "AI 日报" "总结最近一天 AI Agent 领域的重要变化" `
+  --time 10:00 --schedule-type daily --profile 深度 `
+  --domain "人工智能" --types "新闻,公告,研究" `
+  --time-scope "最近 24 小时" --words 1800
+
+deepsearch tasks list
+deepsearch tasks run "AI 日报"
+deepsearch tasks disable "AI 日报"
+deepsearch tasks enable "AI 日报"
 deepsearch schedule --once
-
-# 每 30 秒检查一次的前台进程
-deepsearch schedule --poll 30
 ```
 
-调度状态保存在配置文件旁的 `.deepsearch-schedule-state.json`。只有任务成功生成报告后才记录完成；一个任务失败不会阻止其他到期任务。长期运行建议用 Windows 任务计划程序或 cron 周期调用 `schedule --once`。
+自动任务始终执行研究模式，在线运行需要模型。调度器是本地前台循环：只有 `deepsearch schedule` 进程持续运行时才会按计划检查任务。每个计划实例成功后才记录幂等状态；失败不会标记成功，也不会阻断同一批次中的其他任务。
 
-## 9. 缓存、来源分和质量分
+## 9. 配置与密钥
 
-在线搜索结果和成功正文默认缓存 6 小时；失败请求与 Mock 数据不进入在线缓存。Web 设置页可清理缓存，也可把 `cache_enabled` 设为 `false`。
+### 推荐方式
 
-来源排序综合问题相关性、域名质量、内容完整度和抓取状态，并限制单域名候选数量。来源分表示证据优先级，不表示该来源的每句话都是真的。
+普通配置放在 `config.json`；密钥放在环境变量或 `.streamlit/secrets.toml`。示例：
 
-报告五维评分用于暴露引用、覆盖、来源结构和抓取健康度风险。它不是事实真伪概率，也不能替代查看原文、时效检查或人工审核。
+```toml
+DEEPSEARCH_API_KEY = "your-key"
+DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"
+DEEPSEARCH_MODEL = "gpt-4o-mini"
+DEEPSEARCH_LLM_TIMEOUT = 180
+DEEPSEARCH_BRAVE_API_KEY = "your-brave-key"
 
-## 10. 测试与演示前检查
+DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "integration-key"
+DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "optional-api-key"
+```
+
+配置优先级：内置默认值 → JSON → 环境变量/Streamlit Secrets → 调用参数。`reports_dir`、`cache_dir`、`conversation_dir` 和 outbox 相对路径都相对于配置文件所在目录解析。
+
+旧配置迁移规则：
+
+- 旧 `mode=mock` 映射为 `runtime_mode=mock`；其他旧值映射为 `online`。
+- `default_work_mode=auto/search/research` 只控制 Web 默认工作模式。
+- 旧 `topics` 和旧任务字段会在读取时兼容为新版研究任务结构。
+
+## 10. CLI 参考
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+deepsearch [--config PATH] [--mock] ask QUESTION [--mode auto|search|research] [--no-stream]
+deepsearch [--config PATH] [--mock] interactive
+deepsearch [--config PATH] history [--query TEXT]
+deepsearch [--config PATH] tasks list|add|remove|run|enable|disable ...
+deepsearch [--config PATH] schedule [--once] [--poll SECONDS]
+deepsearch [--config PATH] delivery list|retry [--force]
+deepsearch web [--port PORT]
 ```
 
-当前应看到 `Ran 31 tests` 和 `OK`。再执行：
+`topics` 是 `tasks` 的兼容别名。`interactive` 是研究追问模式，不提供搜索/研究自动路由。
 
-```powershell
-.\.venv\Scripts\python.exe -m deepsearch --mock ask "Python 3.13 有哪些新特性" --no-stream
-.\.venv\Scripts\python.exe -m deepsearch --mock ask "对比 2025 年主流大模型的推理能力和成本" --no-stream
-```
+## 11. 故障排查
 
-验收：事实题 1 轮；复杂题至少 2 轮并显示补充搜索；报告都位于根 `reports/`，包含引用和来源表。
+### 搜索没有结果
 
-## 11. 常见问题排查
+- 检查网络、DNS 和代理；
+- 可配置 Brave Key 提升覆盖率；
+- 站点的 403、521 或正文过短只影响相应页面，系统会保留摘要并继续；
+- 如果所有在线搜索源都失败，系统会明确报错，不会自动改用 Mock。
 
-### `deepsearch` 命令不存在
+### 研究提示缺少模型
 
-确认虚拟环境已激活，并重新执行 `python -m pip install -e .`。也可以直接使用 `python -m deepsearch ...`。
+确认当前不是仅搜索配置，并设置 `DEEPSEARCH_API_KEY`。模型名称和 Base URL 仅显示默认值并不代表密钥可用；修改 Secrets 后重启 Streamlit。
 
-### Web 命令提示未安装 Streamlit
+### 模型返回 HTTP 错误
 
-```powershell
-python -m pip install -e ".[ui]"
-```
+| 状态 | 常见原因 | 处理建议 |
+|---|---|---|
+| 400 | 参数或协议不兼容 | 确认服务支持 Chat Completions 和当前模型参数 |
+| 401 | Key 无效或业务空间错误 | 重新检查密钥来源与所属空间 |
+| 403 | 当前 Key 无模型权限 | 开通权限或换用可用模型 |
+| 404 | Base URL、地域路径或模型 ID 不匹配 | 确认接口根地址最终能拼成 `/chat/completions` |
+| 429 | 频率或额度受限 | 等待后重试并检查配额 |
+| 5xx | 模型服务暂时不可用 | 程序会自动重试一次，仍失败则稍后再试 |
 
-### 页面能打开但在线研究很慢
+404 等确定性配置错误不会做无意义重试；408、409、429 和常见 5xx 会重试一次。
 
-免费搜索和网页抓取受网络影响。先切换 Mock 验证流程；在线调试可适当降低 `request_timeout` 或减少来源预算。日志位于配置文件目录下的 `logs/deepsearch.log`。
+### 模型响应超时
 
-### 一直使用 Mock 来源
+默认单次模型调用超时为 180 秒。研究一般调用模型三次；质量门首次失败时还可能多一次修订。思考模型处理长证据时首个响应较慢，可在设置页把模型超时提高到 300–900 秒，或用 `DEEPSEARCH_LLM_TIMEOUT` 覆盖。该值不是整个研究任务的总时长。
 
-检查是否传了 `--mock`、`mode` 是否为 `mock`、`search_provider` 是否为 `mock`。若为 `auto`，查看日志是否记录两个在线 provider 都无结果。
+### 只有摘要，没有正文
 
-### API Key 无效
+目标页可能需要 JavaScript、登录、付费订阅，或拒绝抓取。系统不会绕过访问控制。PDF 只读取公开、未加密且包含可提取文本的前 80 页；扫描图片型 PDF 不支持 OCR。
 
-确认 Key、`base_url` 和模型名属于同一兼容服务。系统会记录两次调用失败并使用确定性报告器；搜索结果仍会保存。
+### 报告未保存
 
-### 网页只有摘要
+检查页面或日志中的具体阶段。模型阶段失败会标明“证据整理/初稿/独立审校”；引用或内容校验两次失败会抛出质量门错误。失败输出不保存是预期的安全行为。
 
-JavaScript 页面、登录墙、PDF 或反爬站点可能无法提取正文。报告来源表会明确标成“仅使用搜索摘要”，不会伪装为正文成功。
+### 删除后仍看到旧报告
 
-### 完全断网
+2.2 当前实现会让选择器键随报告集合变化而更新。若浏览器仍显示旧界面，请确认运行的是当前工作区代码，并刷新或重启 Streamlit；文件是否实际存在可在资料库或 `data/trash/` 中核对。
 
-显式使用 `--mock` 或设置 `$env:DEEPSEARCH_MODE = "mock"`。`auto` 会先等待在线超时再降级，因此更慢。
+## 12. 数据与安全边界
 
-### 报告出现在错误目录
-
-当前 2.1 已统一根目录逻辑。确认使用的是本项目最新 editable install，并从 `D:\code\pycharm\DeepSearch` 重新执行 `python -m pip install -e .`。默认结果应只写入根 `reports/`。
-
-### 中文终端乱码
-
-优先使用 PowerShell 7 或 Windows Terminal；旧控制台可运行 `chcp 65001`。Markdown 始终按 UTF-8 保存。
+- 只读取公开可访问的 HTTP(S) HTML、纯文本和 PDF。
+- 不绕过登录、付费墙、加密、验证码或访问限制。
+- 不把密钥写入普通设置、会话、报告或 outbox。
+- 风险过滤会排除明显盗版、破解、恶意下载和非 HTTP(S) 在线链接，但不能替代人工判断。
+- 项目回收站只允许操作 `reports/` 与 `data/artifacts/` 中的受支持文件。
