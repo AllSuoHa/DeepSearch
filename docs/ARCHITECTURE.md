@@ -323,3 +323,9 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 - 并发完成顺序不得影响稳定排序和来源编号。
 - 页面、CLI、自动任务必须复用统一 Agent 和领域对象。
 - 资产恢复不得覆盖已有文件，永久删除必须限制在项目回收站内。
+
+## 14. Community Cloud 部署边界
+
+公开托管使用 `streamlit_app.py` 作为入口，`requirements.txt` 通过 `-e .[ui]` 安装当前包。`.streamlit/config.toml` 可以进入仓库；`.streamlit/secrets.toml`、`.env` 与 `config.json` 必须保持未跟踪。云端凭据只由 Streamlit Secrets 注入现有配置合并链路。
+
+Community Cloud 的本地文件系统属于实例运行环境，不是持久数据层。现有 `JsonConversationStore`、`FileReportStorage`、`FileArtifactTrash`、文件缓存、outbox 和任务状态仍可在单个实例生命周期内工作，但不能保证跨重启、重新部署或休眠恢复。要把云端版本用于长期生产数据，必须通过现有端口抽象接入外部数据库、对象存储和可恢复任务执行器，不能把当前文件适配器误当作持久服务。

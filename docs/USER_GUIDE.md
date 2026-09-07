@@ -313,3 +313,48 @@ deepsearch web [--port PORT]
 - 不把密钥写入普通设置、会话、报告或 outbox。
 - 风险过滤会排除明显盗版、破解、恶意下载和非 HTTP(S) 在线链接，但不能替代人工判断。
 - 项目回收站只允许操作 `reports/` 与 `data/artifacts/` 中的受支持文件。
+
+## 13. Streamlit Community Cloud 部署
+
+Streamlit Community Cloud 可免费部署公开应用。DeepSearch 当前 GitHub 仓库为公开仓库，因此部署后默认公开，并可能被搜索引擎收录。部署时填写：
+
+| 字段 | 内容 |
+|---|---|
+| Repository | `AllSuoHa/DeepSearch` |
+| Branch | `main` |
+| Main file path | `streamlit_app.py` |
+| Python version | `3.12` |
+
+仓库根目录的 `requirements.txt` 会用 `-e .[ui]` 安装 DeepSearch 及 Streamlit。代码更新推送到 `main` 后，Community Cloud 会自动重新部署。
+
+### 云端 Secrets
+
+在应用部署页的 **Advanced settings → Secrets**，或部署后的 **App settings → Secrets** 中按 TOML 格式填写。最小研究配置示例：
+
+```toml
+DEEPSEARCH_API_KEY = "your-model-key"
+DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"
+DEEPSEARCH_MODEL = "gpt-4o-mini"
+DEEPSEARCH_LLM_TIMEOUT = 180
+```
+
+如果只使用普通搜索，可以暂不配置模型密钥。需要 Brave Search 时再加入 `DEEPSEARCH_BRAVE_API_KEY`；只有同时部署了可从公网访问的 CustomerService API 时，才配置联动地址和对应凭据。
+
+不要把真实值写入仓库中的 `.streamlit/secrets.toml.example`，也不要提交 `.streamlit/secrets.toml`、`.env` 或 `config.json`。云端 Secrets 的内容不会写入 GitHub。
+
+### 上线检查
+
+1. 打开首页，确认“搜索”模式能返回真实链接；
+2. 已配置模型时，再用一个简短问题验证“研究”模式；
+3. 检查设置页是否只显示已配置状态，不回显密钥；
+4. 把生成的 `https://<subdomain>.streamlit.app` 地址作为项目网站的 DeepSearch 入口；
+5. 如果应用长时间无人访问后唤醒较慢，等待实例恢复后重试。
+
+### 云端运行边界
+
+Community Cloud 的本地文件系统不保证持久保存。`data/`、`reports/`、`.cache/`、`logs/`、页面保存的 `config.json` 和任务状态都可能在实例重启、重新部署或休眠恢复后丢失。因此：
+
+- 云端版本适合公开体验搜索与研究流程；
+- 重要报告应及时下载；
+- 需要长期保存会话、任务或报告时，应实现外部对象存储或数据库适配器；
+- `deepsearch schedule` 是本地前台轮询器，Community Cloud 休眠时不会持续执行。

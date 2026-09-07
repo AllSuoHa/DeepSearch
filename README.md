@@ -8,6 +8,7 @@ DeepSearch 是一个面向个人使用的 AI 搜索与研究助手。它把“�
 
 - [核心能力](#核心能力)
 - [快速开始](#快速开始)
+- [部署到 Streamlit Community Cloud](#部署到-streamlit-community-cloud)
 - [工作模式](#工作模式)
 - [在线配置](#在线配置)
 - [Web 工作台](#web-工作台)
@@ -63,6 +64,34 @@ deepsearch --mock ask "Python 3.13 有哪些新特性"
 ```
 
 Mock 只验证流程，会在界面和报告中明确标识，不计入真实来源、多源验证或质量评分。
+
+## 部署到 Streamlit Community Cloud
+
+[Streamlit Community Cloud](https://streamlit.io/cloud) 可免费托管本项目。当前仓库为公开仓库，因此应用默认也是公开的；公开应用可通过固定的 `*.streamlit.app` 地址访问，并可能被搜索引擎收录。
+
+部署前确认以下文件已经推送到 GitHub：
+
+- `streamlit_app.py`：应用入口；
+- `requirements.txt`：云端安装入口，当前通过 `-e .[ui]` 安装项目及 Web 依赖；
+- `pyproject.toml`：Python 版本与项目依赖定义；
+- `.streamlit/config.toml`：界面主题和非敏感运行配置。
+
+不要提交 `config.json`、`.env` 或 `.streamlit/secrets.toml`。它们已经列入 `.gitignore`；模型、Brave 和 CustomerService 凭据应在 Community Cloud 的应用设置中通过 **Secrets** 填写，键名与 `.streamlit/secrets.toml.example` 一致。
+
+部署参数：
+
+| 项目 | 值 |
+|---|---|
+| Repository | `AllSuoHa/DeepSearch` |
+| Branch | `main` |
+| Main file path | `streamlit_app.py` |
+| Python | `3.12`（Community Cloud 当前默认，满足本项目 `>=3.11`） |
+
+不配置任何密钥也可以使用普通搜索；研究模式必须提供 `DEEPSEARCH_API_KEY`，并按需设置 `DEEPSEARCH_BASE_URL`、`DEEPSEARCH_MODEL` 和 `DEEPSEARCH_LLM_TIMEOUT`。Brave 与 CustomerService 凭据均为可选。
+
+Community Cloud 的本地文件系统不保证持久保存。会话、报告、自动任务、缓存和页面内保存的设置可能在应用重启、重新部署或休眠恢复后丢失；需要长期保存时应接入外部持久化服务。自动任务也不会在应用休眠或无人访问时持续运行。
+
+详细操作和上线检查见 [用户手册：Community Cloud 部署](docs/USER_GUIDE.md#13-streamlit-community-cloud-部署)。
 
 ## 工作模式
 
