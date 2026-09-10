@@ -8,8 +8,16 @@ from deepsearch.infrastructure.storage import (
     FileArtifactStorage,
     FileArtifactTrash,
     PromptShortcutStore,
+    rename_library_artifact,
 )
-from deepsearch.presentation.web.support import research_context_from_messages, search_run_from_messages
+from deepsearch.presentation.web.support import (
+    chat_history_from_messages,
+    chat_run_from_messages,
+    research_context_from_messages,
+    run_from_message,
+    run_from_messages,
+    search_run_from_messages,
+)
 
 
 class ConversationTests(unittest.TestCase):
@@ -135,6 +143,78 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(restored.search.items[0].snippet, "旧记录中的摘要")
         self.assertEqual(restored.search.warnings, ["旧记录提示"])
 
+    def test_follow_up_keeps_each_answers_own_source_links(self):
+        messages = [
+            {"role": "user", "content": "第一次问题", "mode": "auto"},
+            {
+                "role": "assistant",
+                "kind": "search",
+                "mode": "search",
+                "requested_mode": "auto",
+                "question": "第一次问题",
+                "summary": "第一条回答",
+                "content": "第一条回答",
+                "sources": [{"title": "来源一", "url": "https://one.example", "snippet": "一"}],
+            },
+            {"role": "user", "content": "继续问", "mode": "search"},
+            {
+                "role": "assistant",
+                "kind": "search",
+                "mode": "search",
+                "requested_mode": "search",
+                "question": "继续问",
+                "summary": "第二条回答",
+                "content": "第二条回答",
+                "sources": [{"title": "来源二", "url": "https://two.example", "snippet": "二"}],
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConversationStore(Path(directory) / "conversations")
+            conversation = store.create()
+            for message in messages:
+                store.append(conversation, message)
+            reloaded = store.load(conversation["id"])
+        assert reloaded is not None
+        restored_messages = reloaded["messages"]
+        first = run_from_message(restored_messages, 1)
+        second = run_from_message(restored_messages, 3)
+        latest = run_from_messages(restored_messages)
+
+        assert first is not None and first.search is not None
+        assert second is not None and second.search is not None
+        assert latest is not None and latest.search is not None
+        self.assertEqual(first.search.query, "第一次问题")
+        self.assertEqual(first.search.items[0].url, "https://one.example")
+        self.assertEqual(second.search.items[0].url, "https://two.example")
+        self.assertEqual(latest.search.items[0].url, "https://two.example")
+
+    def test_saved_chat_restores_as_chat_and_history_is_bounded(self):
+        messages = [
+            {"role": "user", "content": f"消息 {index}", "mode": "chat"}
+            for index in range(8)
+        ]
+        messages.append({
+            "role": "assistant",
+            "kind": "chat",
+            "mode": "chat",
+            "question": "你好",
+            "content": "你好！",
+            "artifact_path": "",
+            "sources": [],
+            "used_fallback": True,
+        })
+
+        restored = chat_run_from_messages(messages)
+        self.assertIsNotNone(restored)
+        assert restored is not None and restored.chat is not None
+        self.assertEqual(restored.resolved_mode.value, "chat")
+        self.assertEqual(restored.chat.answer, "你好！")
+        self.assertIsNone(restored.artifact_path)
+        history = chat_history_from_messages(messages, limit=6)
+        self.assertEqual(len(history), 6)
+        self.assertEqual(history[-1].content, "你好！")
+
     def test_prompt_shortcuts_support_persistent_add_edit_and_delete(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "prompt-shortcuts.json"
@@ -197,6 +277,41 @@ class ConversationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 trash.delete(outside)
             self.assertTrue(outside.is_file())
+
+    def test_library_report_rename_updates_title_filename_and_session_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            artifacts = root / "artifacts"
+            conversations = root / "conversations"
+            reports.mkdir()
+            artifacts.mkdir()
+            report = artifacts / "2026-09-09_120000_old-title_搜索.md"
+            report.write_text("# 旧标题\n\n正文", encoding="utf-8")
+            store = ConversationStore(conversations)
+            conversation = store.create()
+            store.append(conversation, {
+                "role": "assistant",
+                "content": "正文",
+                "artifact_path": str(report),
+            })
+
+            renamed = rename_library_artifact(report, "新的文档名称", (reports, artifacts))
+            changed = store.replace_artifact_reference(report, renamed)
+
+            self.assertFalse(report.exists())
+            self.assertTrue(renamed.is_file())
+            self.assertIn("新的文档名称", renamed.name)
+            self.assertIn("_搜索", renamed.stem)
+            self.assertTrue(renamed.read_text(encoding="utf-8").startswith("# 新的文档名称\n"))
+            self.assertEqual(changed, 1)
+            saved = store.load(conversation["id"])
+            self.assertEqual(saved["messages"][0]["artifact_path"], str(renamed.resolve()))
+
+            outside = root / "outside.md"
+            outside.write_text("# 越界", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "资料库"):
+                rename_library_artifact(outside, "越界", (reports, artifacts))
 
 
 if __name__ == "__main__":

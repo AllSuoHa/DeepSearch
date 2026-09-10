@@ -22,6 +22,12 @@
     "request_timeout": 180.0,
     "api_key": ""
   },
+  "chat_llm": {
+    "base_url": "",
+    "model": "",
+    "request_timeout": 30.0,
+    "api_key": ""
+  },
   "customer_service": {
     "enabled": false,
     "base_url": "http://127.0.0.1:8000",

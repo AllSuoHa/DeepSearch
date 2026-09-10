@@ -1,6 +1,6 @@
 # DeepSearch 2.2 开发与维护
 
-> 面向维护者 · 最后校准：2026-09-07
+> 面向维护者 · 最后校准：2026-09-10
 
 ## 1. 当前基线
 
@@ -8,24 +8,27 @@
 - Python：`>=3.11`
 - Web：Streamlit `>=1.62,<2`
 - 运行依赖：`trafilatura>=2,<3`、`pypdf>=6,<7`
-- 默认回归：69 项离线优先测试
+- 默认回归：94 项离线优先测试
 - 公共门面：`DeepSearchAgent.run()`；`research()`、`follow_up()` 保持兼容
-- 当前主线：个人对话工作台 + 独立搜索 + 证据型研究 + 本地资产管理
+- 当前主线：个人对话工作台 + 智能直接回答 + 独立搜索 + 证据型研究 + 本地资产管理
 
 原始需求中“搜、读、验证、写报告、追问、定时收集”的核心目标仍然有效，但早期“只有研究、CLI 为主”的产品描述已经不再代表当前实现。当前事实以根 README、用户手册和架构说明为准。
 
 ## 2. 关键技术决策
 
-### 2.1 搜索和研究是两种产品流程
+### 2.1 直接回答、搜索和研究是三种产品流程
 
-最初所有问题都进入研究报告，导致找资源、官网或播放平台时返回大量“摘要、论证、下一步”文字。2.2 把流程拆开：
+最初所有问题都进入研究报告，导致问候、找资源或官网请求也返回大量“摘要、论证、下一步”文字。当前把流程拆开：
 
+- `ChatService` 返回短消息，优先执行本地时间与计算，可调用独立轻量模型；
 - `SearchService` 直接返回链接、分类和风险提示，不调用模型；
 - `ResearchService` 负责多轮检索、正文、证据、报告和质量门；
-- `IntentClassifier` 只在 `AUTO` 时路由，歧义默认走更轻的搜索；
-- `AgentRunResult` 保证一次运行只携带一种实际结果。
+- `IntentClassifier` 在智能判断时路由，没有检索或研究信号就直接回答；
+- `AgentRunResult` 保证一次运行只携带 `ChatResult`、`SearchResponse` 或 `ResearchResult` 中的一种。
 
 这样做不是给同一报告换模板，而是把用户意图、成本和交付结构分开。
+
+快速回答模型和研究模型故意保留两套配置。组合根只在 `chat_llm` 参数齐全时创建快速回答客户端；未配置、超时或限流都由 `ChatService` 本地降级，不允许自动调用搜索或把研究模型当备用。这一边界同时避免意外计费和把高成本模型暴露给简单请求。
 
 ### 2.2 轻量 Clean Architecture
 
@@ -68,15 +71,15 @@
 
 ### 2.5 进度实时更新，终稿校验后展示
 
-Web 层的 `RunProgressTracker` 是线程安全的展示状态：后台线程只执行 Agent 并写入 phase/message，不能读取 `st.session_state` 或调用任何 Streamlit API；页面线程通过 `wait_for_background_result()` 读取不可变快照并更新 `st.status(type="compact")`。轮询对齐任务启动后的整数秒，阶段事件又可提前唤醒，因此计时稳定每秒更新，步骤变化也能立即显示。
+Web 层的 `RunProgressTracker` 是线程安全的展示状态：后台线程只执行 Agent 并写入 phase/message，不能读取 `st.session_state` 或调用任何 Streamlit API；页面线程通过 `wait_for_background_result()` 读取不可变快照，只更新 `st.status(type="compact")` 内部的占位内容。外层状态标题在运行中保持稳定，避免增量更新重置用户的展开状态。
 
-折叠区标题为“思考步骤与说明”，保留准备、规划、搜索、抓取、充分性判断、补搜、交叉验证、证据整理、初稿、审校、验证、评分和保存等高层阶段。每个连续阶段只保留最新说明并计算独立持续时间；这是可审计运行摘要，不是隐性思维链。详细诊断仍由 `RoundTrace` 和轮转日志承担。
+折叠区标题为“思考中 · 点击查看步骤”，内容标题为“思考步骤与说明”。直接回答只经过“理解问题、生成直接回复”等少量阶段，搜索和研究按实际执行增加检索、抓取、证据、初稿、审校、验证、评分和保存。用户展开后，增量内容更新不会自动收起；每个连续阶段只保留最新说明并计算独立持续时间。
 
 首页停止按钮由显式 `st.empty` 占位符承载。任务结束时先把 `agent_run_state` 设为 idle，再清空占位符并渲染结果，避免完成结果与旧“停止生成”按钮同时出现。协作式取消通过 tracker 的线程事件传到下一阶段回调；阻塞中的 HTTP 调用仍由各自超时控制。
 
 回顶/到底没有原生 Streamlit 命令，因此单独封装在 `presentation/web/scroll_controls.py` 的内联 Custom Components v2 组件中。组件使用 Shadow DOM 隔离样式、Streamlit 主题变量和固定 SVG 图标，只查询受信任的页面滚动容器，不接收用户或模型内容；点击只调用浏览器滚动，不向 Python 回传事件或触发 rerun。不同 Streamlit 版本的实际滚动节点并不固定，组件会从 `stAppScrollToBottomContainer`、`stMain`、应用容器和浏览器根节点中动态选择“可滚动且滚动范围最大”的节点，并用捕获阶段滚动事件、`ResizeObserver` 与 `MutationObserver` 在内容增长时重新计算。按钮默认隐藏，仅主内容区 `wheel` 活动时按方向淡入，停止约 1.4 秒后淡出，并同步 ARIA/tab 顺序。按钮点击采用可取消的 `requestAnimationFrame` 缓动；新的滚轮事件先取消缓动但不阻止浏览器默认滚动，避免底部反向滚动被原生 `behavior: smooth` 动画吞掉。禁止改回 `components.v1`、iframe 或跨实例的全局 CSS/事件选择器。
 
-研究终稿不做 token 级流式输出。三阶段模型调用和确定性校验完成前，正文都可能被重写或拒绝；提前输出会暴露未审校内容，并让失败语义和引用状态不一致。页面只实时更新任务计时与步骤，最终 Markdown 在通过质量门后一次性渲染。CLI 同样打印完整结果，不模拟流式效果。
+结果正文不做 token 级流式输出。研究在三阶段模型调用和确定性校验完成前可能被重写或拒绝；直接回复完整返回后再持久化。页面只实时更新任务计时与步骤，最终内容一次性渲染。
 
 ### 2.6 在线失败不降级为 Mock
 
@@ -154,7 +157,8 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 
 | 能力 | 主要实现 | 主要测试 |
 |---|---|---|
-| 智能判断 / 搜索 / 研究 | `application/intent.py`, `bootstrap.py` | `test_search_modes.py`, `test_agent.py` |
+| 智能判断 / 搜索 / 研究 | `application/intent.py`, `application/chat_service.py`, `bootstrap.py` | `test_chat_mode.py`, `test_search_modes.py`, `test_agent.py` |
+| 快速回答模型隔离、本地工具与上下文脱敏 | `application/chat_service.py`, `infrastructure/config.py` | `test_chat_mode.py` |
 | 链接优先搜索、风险过滤 | `application/search_service.py` | `test_search_modes.py` |
 | 多轮研究与停止条件 | `application/planner.py`, `application/service.py` | `test_planner.py`, `test_agent.py` |
 | 排序、域名多样性和缓存 | `domain/ranking.py`, `infrastructure/cache.py` | `test_cache_ranking.py` |
@@ -184,20 +188,22 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 |---|---:|---|
 | `test_agent.py` | 5 | 研究循环、追问、配置隔离 |
 | `test_cache_ranking.py` | 2 | 缓存、稳定排序和域名配额 |
-| `test_conversations.py` | 7 | 会话、快照、快捷输入、回收站 |
-| `test_customer_service.py` | 9 | v2 异步状态、幂等、重试、敏感信息和 outbox |
+| `test_chat_mode.py` | 10 | 路由、本地时间与计算、模型隔离、上下文和配置安全 |
+| `test_conversations.py` | 10 | 会话、逐条来源恢复、快照、快捷输入、回收站 |
+| `test_customer_service.py` | 11 | v2 异步状态、幂等、重试、敏感信息和 outbox |
 | `test_evaluation.py` | 2 | 质量维度和 Mock 排除 |
 | `test_fetcher.py` | 4 | HTML、PDF、并发与控制字符 |
 | `test_llm.py` | 4 | 超时、HTTP 错误、重试和配置安全 |
 | `test_planner.py` | 3 | 分类、最低轮次和查询范围 |
-| `test_report_quality.py` | 4 | 三阶段、阶段错误和失败不落盘 |
+| `test_report_export.py` | 5 | Markdown、Word、PDF、TXT、JSON、HTML 导出与链接安全 |
+| `test_report_quality.py` | 5 | 三阶段、阶段错误和失败不落盘 |
 | `test_search_modes.py` | 5 | 路由、媒体结果、风险和在线失败 |
-| `test_storage.py` | 1 | 多格式导出 |
-| `test_streamlit_app.py` | 9 | 页面、控件、状态和视觉合同 |
+| `test_storage.py` | 2 | 多格式存储与资料库安全重命名 |
+| `test_streamlit_app.py` | 15 | 页面、直接回答资产隔离、控件、状态和视觉合同 |
 | `test_topics.py` | 6 | 任务迁移、周期、幂等和失败隔离 |
-| `test_verification.py` | 3 | 引用、支持度、重复和噪声 |
+| `test_verification.py` | 5 | 引用、支持度、重复和噪声 |
 
-总计 69 项。真实网络和真实模型不进入默认回归，因为内容、频率限制和可用性不稳定。可以增加非阻断契约测试，但不能替代离线单元测试。
+总计 94 项。真实网络和真实模型不进入默认回归，因为内容、频率限制和可用性不稳定。可以增加非阻断契约测试，但不能替代离线单元测试。
 
 ## 6. 代码注释约定
 
@@ -269,7 +275,7 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 - **V2.0**：分层架构、五维质量评分、研究预算和多页面 Streamlit。
 - **V2.1**：结论优先、`ResearchBrief`、多格式导出、证据感知追问和完整自动任务。
 - **V2.2**：对话式个人工作台、搜索/研究分流、学术源、三阶段审校、本地会话、资料库回收站和统一投递。
-- **V2.2 维护更新**：删除后选择器状态同步；搜索卡片历史恢复；模型超时可配置；HTTP/超时错误可操作化。
+- **V2.2 维护更新**：删除后选择器状态同步；逐条历史来源恢复；模型超时可配置；HTTP/超时错误可操作化；直接回答改为智能匹配，并增加本地时间与计算能力。
 
 早期 `pro.md`、2.1 项目总结和单独需求追踪表已在 2026-09-07 合并到当前文档体系并删除。Git 历史保留它们的原始内容。
 

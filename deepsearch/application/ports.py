@@ -1,6 +1,6 @@
 """应用层端口定义。
 
-Protocol 只约束研究服务需要哪些能力，不规定能力由哪个库或服务实现。
+Protocol 只约束应用用例需要哪些能力，不规定能力由哪个库或服务实现。
 测试可注入内存实现，生产环境则由 ``bootstrap.py`` 注入真实适配器。
 """
 
@@ -24,6 +24,12 @@ from ..domain.models import (
 )
 
 Progress = Callable[[str, str], None]
+
+
+class ChatModel(Protocol):
+    """快速回答用文本模型端口；基础设施可复用任意兼容客户端。"""
+
+    def generate(self, system: str, user: str) -> str: ...
 
 
 class SearchProvider(Protocol):

@@ -7,6 +7,11 @@ import streamlit as st
 
 from deepsearch.bootstrap import DeepSearchAgent, apply_profile
 from deepsearch.domain.models import ReportSpecification, ResearchBrief
+from deepsearch.presentation.web.delivery import (
+    DATA_CLASSIFICATION_OPTIONS,
+    data_classification_label,
+    data_classification_value,
+)
 from deepsearch.presentation.web.styles import render_page_header
 from deepsearch.presentation.web.support import (
     RunProgressSnapshot,
@@ -55,7 +60,7 @@ with st.expander("新建自动任务", icon=":material/add_task:", expanded=not 
         target_words = delivery_right.number_input("目标篇幅（字）", 500, 5000, 1500, 100)
         deliver = st.checkbox("完成后自动推送到 CustomerService")
         classification = st.segmented_control(
-            "文档密级", ["public", "internal", "confidential"], default="internal",
+            "文档密级", DATA_CLASSIFICATION_OPTIONS, default="内部",
         )
         add_task = st.form_submit_button("保存任务", type="primary", icon=":material/save:")
 
@@ -70,7 +75,7 @@ with st.expander("新建自动任务", icon=":material/add_task:", expanded=not 
                 run_date=run_date.strftime("%Y-%m-%d") if schedule_type == "once" else "",
                 profile=profile,
                 deliver_to_customer_service=deliver,
-                data_classification=str(classification or "internal"),
+                data_classification=data_classification_value(classification),
                 brief=ResearchBrief(
                     domain=domain.strip() or "通用",
                     information_types=tuple(information_types or ["知识"]),
@@ -95,7 +100,7 @@ rows = [{
     "周期": {"daily": "每天", "weekly": "每周", "once": "单次"}[task.schedule_type],
     "时间": task.run_time,
     "强度": task.profile,
-    "推送": task.data_classification if task.deliver_to_customer_service else "不推送",
+    "推送": data_classification_label(task.data_classification) if task.deliver_to_customer_service else "不推送",
     "状态": "启用" if task.enabled else "停用",
 } for task in tasks]
 st.dataframe(pd.DataFrame(rows), hide_index=True, key="automation-table")

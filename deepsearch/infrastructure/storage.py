@@ -125,6 +125,84 @@ class FileArtifactStorage:
         return path
 
 
+def rename_library_artifact(
+    artifact_path: Path,
+    new_title: str,
+    allowed_roots: tuple[Path, ...],
+) -> Path:
+    """安全修改资料库标题和文件名，不允许越过配置的资产目录。"""
+
+    source = artifact_path.resolve(strict=True)
+    roots = tuple(root.resolve() for root in allowed_roots)
+    if (
+        not source.is_file()
+        or source.suffix.lower() not in {".md", ".txt", ".json"}
+        or not any(source.is_relative_to(root) for root in roots)
+    ):
+        raise ValueError("只能重命名资料库中的报告或搜索快照")
+
+    title = re.sub(r"\s+", " ", new_title).strip()
+    if not title:
+        raise ValueError("文档名称不能为空")
+    if len(title) > 120:
+        raise ValueError("文档名称最多 120 个字符")
+
+    raw_content = source.read_text(encoding="utf-8")
+    suffix = source.suffix.lower()
+    if suffix == ".json":
+        try:
+            payload = json.loads(raw_content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("JSON 报告格式损坏，无法重命名") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON 报告格式无效，无法重命名")
+        payload["question"] = title
+        content_markdown = payload.get("content_markdown")
+        if isinstance(content_markdown, str):
+            payload["content_markdown"] = _replace_document_heading(content_markdown, title)
+        updated_content = json.dumps(payload, ensure_ascii=False, indent=2)
+    elif suffix == ".md":
+        updated_content = _replace_document_heading(raw_content, title)
+    else:
+        lines = raw_content.splitlines(keepends=True)
+        line_ending = "\r\n" if raw_content.startswith("\r\n") or "\r\n" in raw_content else "\n"
+        if lines:
+            first_ending = "\r\n" if lines[0].endswith("\r\n") else "\n" if lines[0].endswith("\n") else ""
+            lines[0] = title + first_ending
+            updated_content = "".join(lines)
+        else:
+            updated_content = title + line_ending
+
+    prefix_match = re.match(r"^(\d{4}-\d{2}-\d{2}_\d{6}_)", source.stem)
+    prefix = prefix_match.group(1) if prefix_match else ""
+    kind_suffix = "_搜索" if "_搜索" in source.stem else ""
+    base_name = f"{prefix}{_slugify(title, limit=72)}{kind_suffix}"
+    target = source.with_name(f"{base_name}{source.suffix}")
+    counter = 1
+    while target.exists() and target.resolve() != source:
+        target = source.with_name(f"{base_name}_{counter}{source.suffix}")
+        counter += 1
+
+    temporary = source.with_name(f".{source.name}.{uuid4().hex}.tmp")
+    temporary.write_text(updated_content, encoding="utf-8")
+    try:
+        if target.resolve() == source:
+            temporary.replace(source)
+            return source
+        source.replace(target)
+        try:
+            temporary.replace(target)
+        except OSError:
+            target.replace(source)
+            raise
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return target.resolve()
+
+
 class ConversationStore:
     """单机 JSON 会话历史；不保存密钥或抓取到的完整网页正文。"""
 
@@ -177,9 +255,10 @@ class ConversationStore:
         safe = {
             key: value for key, value in message.items()
             if key in {
-                "role", "content", "mode", "kind", "artifact_path", "sources", "delivery",
+                "message_id", "role", "content", "mode", "requested_mode", "kind",
+                "artifact_path", "sources", "delivery",
                 "question", "summary", "rounds", "stop_reason", "review_summary",
-                "queries", "warnings",
+                "queries", "warnings", "used_fallback",
             }
         }
         conversation.setdefault("messages", []).append(safe)
@@ -235,6 +314,29 @@ class ConversationStore:
                 value = str(message.get("artifact_path", "")).strip()
                 if value and Path(value).resolve() == expected:
                     message["artifact_path"] = ""
+                    changed = True
+            if changed:
+                self.save(conversation)
+                changed_count += 1
+        return changed_count
+
+    def replace_artifact_reference(self, previous_path: Path, current_path: Path) -> int:
+        """资产重命名后更新会话引用，避免历史消息留下失效下载链接。"""
+
+        expected = previous_path.resolve()
+        replacement = str(current_path.resolve())
+        changed_count = 0
+        if not self.directory.exists():
+            return changed_count
+        for path in self.directory.glob("*.json"):
+            conversation = self.load(path.stem)
+            if not conversation:
+                continue
+            changed = False
+            for message in conversation.get("messages", []):
+                value = str(message.get("artifact_path", "")).strip()
+                if value and Path(value).resolve() == expected:
+                    message["artifact_path"] = replacement
                     changed = True
             if changed:
                 self.save(conversation)
@@ -467,3 +569,17 @@ class FileArtifactTrash:
 def _slugify(value: str, limit: int = 40) -> str:
     slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", value, flags=re.UNICODE).strip("-")
     return (slug or "report")[:limit]
+
+
+def _replace_document_heading(content: str, title: str) -> str:
+    """替换 Markdown 首行标题；无标题的旧文档则补充一个标题。"""
+
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return f"# {title}\n"
+    if re.match(r"^#\s+", lines[0]):
+        ending = "\r\n" if lines[0].endswith("\r\n") else "\n" if lines[0].endswith("\n") else ""
+        lines[0] = f"# {title}{ending}"
+        return "".join(lines)
+    separator = "\r\n" if "\r\n" in content else "\n"
+    return f"# {title}{separator}{separator}{content}"

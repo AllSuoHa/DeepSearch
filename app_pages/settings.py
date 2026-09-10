@@ -10,11 +10,11 @@ from deepsearch.presentation.web.styles import render_page_header
 from deepsearch.presentation.web.support import get_settings
 
 settings = get_settings()
-render_page_header("PREFERENCES", "设置", "管理搜索连接、研究模型、知识库联动和本地数据。密钥不会显示或写入配置文件。")
+render_page_header("PREFERENCES", "设置", "管理搜索连接、研究/快速回答模型、知识库联动和本地数据。密钥不会显示或写入配置文件。")
 
 search_tab, model_tab, integration_tab, data_tab = st.tabs([
     ":material/search: 搜索",
-    ":material/neurology: 研究模型",
+    ":material/neurology: 研究与快速回答模型",
     ":material/sync_alt: 知识库联动",
     ":material/database: 本地数据",
 ])
@@ -29,7 +29,9 @@ with search_tab:
         )
         work_label = st.segmented_control(
             "默认工作模式", ["智能判断", "搜索", "研究"],
-            default={"auto": "智能判断", "search": "搜索", "research": "研究"}[settings.default_work_mode],
+            default={
+                "auto": "智能判断", "search": "搜索", "research": "研究",
+            }.get(settings.default_work_mode, "智能判断"),
         )
         columns = st.columns(3)
         max_rounds = columns[0].number_input("研究最大轮次", 1, 5, settings.max_rounds)
@@ -39,7 +41,9 @@ with search_tab:
     if saved:
         settings.runtime_mode = "mock" if runtime_label == "演示" else "online"
         settings.mode = "mock" if settings.runtime_mode == "mock" else "auto"
-        settings.default_work_mode = {"智能判断": "auto", "搜索": "search", "研究": "research"}[work_label]
+        settings.default_work_mode = {
+            "智能判断": "auto", "搜索": "search", "研究": "research",
+        }[work_label]
         settings.max_rounds = int(max_rounds)
         settings.max_sources = int(max_sources)
         settings.request_timeout = float(request_timeout)
@@ -84,6 +88,67 @@ with model_tab:
         language="toml",
     )
     st.caption("可放入环境变量或 `.streamlit/secrets.toml`，保存普通设置时不会落盘。")
+
+    st.space("small")
+    st.subheader("快速回答模型")
+    chat_configured = all((
+        settings.chat_llm.api_key,
+        settings.chat_llm.base_url,
+        settings.chat_llm.model,
+    ))
+    with st.container(border=True):
+        if chat_configured and settings.runtime_mode == "mock":
+            st.badge("已配置 · 演示模式未调用", color="blue")
+        else:
+            st.badge(
+                "已配置" if chat_configured else "未配置 · 使用本地回复",
+                color="green" if chat_configured else "orange",
+            )
+        st.caption(f"当前 Base URL：{settings.chat_llm.base_url or '未设置'}")
+        st.caption(f"当前模型：{settings.chat_llm.model or '未设置'}")
+        st.caption(f"请求超时：{settings.chat_llm.request_timeout:g} 秒")
+        st.markdown(
+            "快速回答模型与研究模型相互独立。未配置、超时或额度不足时，只处理本地时间、"
+            "简单计算、问候和功能介绍，不会改用搜索或研究模型。"
+        )
+    with st.form("chat-model-settings"):
+        chat_base_url = st.text_input(
+            "快速回答模型 Base URL",
+            value=settings.chat_llm.base_url,
+            placeholder="OpenAI Chat Completions 兼容 API 地址",
+        )
+        chat_model_name = st.text_input(
+            "快速回答模型名称",
+            value=settings.chat_llm.model,
+            placeholder="由所选服务商提供",
+        )
+        chat_timeout = st.number_input(
+            "快速回答请求超时（秒）",
+            min_value=5.0,
+            max_value=180.0,
+            value=float(settings.chat_llm.request_timeout),
+            step=5.0,
+        )
+        saved_chat_model = st.form_submit_button(
+            "保存快速回答模型设置", type="primary", icon=":material/save:",
+        )
+    if saved_chat_model:
+        settings.chat_llm.base_url = chat_base_url.strip().rstrip("/")
+        settings.chat_llm.model = chat_model_name.strip()
+        settings.chat_llm.request_timeout = float(chat_timeout)
+        save_settings(settings)
+        st.toast("快速回答模型设置已保存；API Key 仍需通过 Secrets 或环境变量配置。", icon=":material/check_circle:")
+    st.code(
+        'DEEPSEARCH_CHAT_API_KEY = ""\n'
+        'DEEPSEARCH_CHAT_BASE_URL = ""\n'
+        'DEEPSEARCH_CHAT_MODEL = ""\n'
+        'DEEPSEARCH_CHAT_TIMEOUT = 30',
+        language="toml",
+    )
+    st.caption(
+        "Streamlit Cloud 不读取开发电脑里的本地 Secrets；请在应用 Settings → Secrets 中填写。"
+        "“轻量模型”不代表一定免费，费用取决于所选服务商。"
+    )
 
 with integration_tab:
     st.subheader("CustomerService")

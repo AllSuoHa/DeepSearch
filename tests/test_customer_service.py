@@ -19,12 +19,22 @@ from deepsearch.infrastructure.customer_service import (
 )
 from deepsearch.infrastructure.storage import ConversationStore
 from deepsearch.presentation.web.delivery import (
+    DATA_CLASSIFICATION_OPTIONS,
     build_library_delivery_artifact,
     conversation_delivery_external_id,
+    data_classification_label,
+    data_classification_value,
 )
 
 
 class CustomerServicePublisherTests(unittest.TestCase):
+    def test_data_classification_uses_chinese_labels_without_changing_contract_values(self):
+        self.assertEqual(DATA_CLASSIFICATION_OPTIONS, ("公开", "内部", "机密"))
+        self.assertEqual(data_classification_value("公开"), "public")
+        self.assertEqual(data_classification_value("内部"), "internal")
+        self.assertEqual(data_classification_value("机密"), "confidential")
+        self.assertEqual(data_classification_label("confidential"), "机密")
+
     def _objects(self, directory: str, content: str = "# Report\n\nVerified answer [1]."):
         report_path = Path(directory) / "report.md"
         report_path.write_text(content, encoding="utf-8")

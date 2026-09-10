@@ -1,13 +1,24 @@
 """DeepSearch public package API."""
 
 from .bootstrap import DeepSearchAgent, build_research_service
-from .domain.models import AgentRequest, AgentRunResult, ReportSpecification, ResearchBrief, SearchResponse, WorkMode
+from .domain.models import (
+    AgentRequest,
+    AgentRunResult,
+    ChatResult,
+    ChatTurn,
+    ReportSpecification,
+    ResearchBrief,
+    SearchResponse,
+    WorkMode,
+)
 from .infrastructure.config import Settings, load_settings
 
 __all__ = [
     "DeepSearchAgent",
     "AgentRequest",
     "AgentRunResult",
+    "ChatResult",
+    "ChatTurn",
     "ReportSpecification",
     "ResearchBrief",
     "SearchResponse",

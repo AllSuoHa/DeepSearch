@@ -3,3 +3,5 @@ pytest-cov>=5.0
 streamlit>=1.62,<2
 trafilatura>=2,<3
 pypdf>=6,<7
+python-docx>=1.1,<2
+reportlab>=4,<5

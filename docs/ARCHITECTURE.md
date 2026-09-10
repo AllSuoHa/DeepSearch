@@ -1,17 +1,17 @@
 # DeepSearch 2.2 架构说明
 
-> 当前实现基线 · 最后校准：2026-09-07
+> 当前实现基线 · 最后校准：2026-09-10
 
 ## 1. 系统定位与边界
 
-DeepSearch 是单机、单用户、本地优先的 AI 搜索与研究助手。核心目标是用同一套领域模型支持两种不同交付：快速、链接优先的搜索结果，以及经过证据综合和质量门的研究报告。
+DeepSearch 是单机、单用户、本地优先的 AI 问答、搜索与研究助手。核心目标是以统一请求支持三种互斥交付：智能匹配的直接回答、链接优先的搜索结果，以及经过证据综合和质量门的研究报告。
 
 系统有两个正交维度：
 
 | 维度 | 取值 | 决定什么 |
 |---|---|---|
 | 运行数据模式 | `runtime_mode=online/mock` | 使用真实在线来源还是显式演示数据 |
-| 请求工作模式 | `WorkMode=AUTO/SEARCH/RESEARCH` | 本次返回搜索卡片还是研究报告 |
+| 请求工作模式 | 用户可选 `AUTO/SEARCH/RESEARCH`；`CHAT` 为内部结果 | 本次返回直接回答、搜索卡片还是研究报告 |
 
 `AUTO` 不是离线/在线开关。旧 `mode=auto/mock` 只作为配置兼容入口，在加载时映射到 `runtime_mode`。
 
@@ -25,6 +25,7 @@ flowchart TB
     CLI[CLI] --> FACADE
     JOBS[Scheduler] --> FACADE
     FACADE --> ROUTE[IntentClassifier]
+    FACADE --> CHAT[ChatService]
     FACADE --> SEARCH[SearchService]
     FACADE --> RESEARCH[ResearchService]
     RESEARCH --> PORTS[Application Protocols]
@@ -38,7 +39,7 @@ flowchart TB
 依赖规则：
 
 - `domain`：跨层数据结构与稳定排序，不依赖 Streamlit、HTTP 或磁盘。
-- `application`：工作模式识别、搜索用例、研究反馈循环、验证和评分；只面向领域模型与 Protocol。
+- `application`：工作模式识别、直接回答/搜索用例、研究反馈循环、验证和评分；只面向领域模型与 Protocol。
 - `infrastructure`：搜索 API、网页抓取、模型客户端、报告器、缓存、文件存储和 CustomerService 投递。
 - `presentation`：CLI 与 Streamlit 适配；把用户输入转换为 `AgentRequest`，把结果转换为界面或终端输出。
 - `scheduling`：自动任务模型、到期判断和执行状态；继续调用统一 Agent。
@@ -63,8 +64,8 @@ flowchart TB
 DeepSearchAgent.run(AgentRequest) -> AgentRunResult
 ```
 
-- `AgentRequest`：问题、请求模式、`ResearchBrief`、语言/地区和会话 ID。
-- `AgentRunResult`：只包含 `SearchResponse` 或 `ResearchResult` 中的一种。
+- `AgentRequest`：问题、请求模式、`ResearchBrief`、语言/地区、会话 ID 和最多少量 `ChatTurn`。
+- `AgentRunResult`：只包含 `ChatResult`、`SearchResponse` 或 `ResearchResult` 中的一种。
 - `ResearchBrief`：领域、目标、信息类型、时间范围和 `ReportSpecification`。
 - `ReportSpecification`：输出格式、篇幅、读者、语言、章节和额外要求。
 
@@ -74,13 +75,23 @@ DeepSearchAgent.run(AgentRequest) -> AgentRunResult
 
 Streamlit 页面不在主脚本线程中直接执行阻塞研究。页面先构造完整 `AgentRequest` 和 Agent，再把纯 Python 调用提交给共享的有限 `ThreadPoolExecutor`；后台线程只能向线程安全的 `RunProgressTracker` 写入应用层 phase/message，不能访问 Session State 或调用 `st.*`。
 
-页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 因此可以每秒更新总用时，折叠区展示高层思考步骤、阶段说明和单步用时。任务结束后页面线程负责持久化、结果渲染和清除停止按钮。停止信号在阶段回调边界生效，不会强杀正在进行的 HTTP 请求，也不是可恢复的后台作业系统。
+页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 的外层标题在运行中保持稳定，只更新内部占位符中的阶段、说明和用时，因此用户手动展开后不会被增量更新收起。任务结束后页面线程负责持久化、结果渲染和清除停止按钮。
 
 页面滚动是唯一需要浏览器能力的交互，隔离在 `presentation/web/scroll_controls.py` 的内联 CCv2 组件。组件挂载于耗时研究之前，以 Shadow DOM 和主题变量绘制回顶/到底按钮，从受信任候选中动态定位实际滚动节点；按钮只在主内容区滚轮活动时按可用方向短暂淡入，空闲后淡出。点击滚动由可随滚轮取消的帧动画完成，不传递业务数据、不阻止默认滚轮，也不触发应用 rerun；其余页面行为继续优先使用原生 Streamlit API。
 
-## 4. 路由与搜索流程
+## 4. 路由、直接回答与搜索流程
 
-`IntentClassifier` 在显式选择为 `AUTO` 时才运行。它比较搜索关键词和研究关键词的命中数；研究信号严格更多时进入研究，否则保守选择搜索。
+`IntentClassifier` 在 `AUTO` 和旧兼容值 `CHAT` 时运行。时间、计算、翻译、普通常识、问候和功能帮助进入直接回答；官网、链接、价格、天气、新闻和网页实时状态进入搜索；调研、综述、报告、方案和多来源论证进入研究。只有用户显式选择的搜索或研究会强制覆盖智能判断；没有检索或研究信号时默认直接回答。
+
+### 4.1 快速回答隔离
+
+`ChatService` 位于应用层，先用本地时钟和受限算术求值处理确定性请求，再按需使用可选的 `ChatModel`。组合根仅在 `chat_llm` 的 Base URL、模型和 API Key 全部存在时创建独立客户端；研究模型实例不会成为快速回答的回退。模型未配置、超时、限流或失败时也不会自动调用搜索或研究。
+
+发送给模型的上下文最多保留最近 6 条、每条最多 600 字符，只允许 user/assistant 纯文本；搜索快照和研究报告不会进入上下文，常见密钥赋值和令牌形态在发送前脱敏。模型输出被限制为最多 400 字符。
+
+`ChatResult` 没有来源和 `artifact_path`。展示层只把它作为 `kind=chat` 的助手消息写入会话，不创建搜索快照、报告、资料库条目或 CustomerService 投递对象。
+
+### 4.2 搜索流程
 
 ```mermaid
 sequenceDiagram
@@ -253,6 +264,8 @@ logs/deepsearch.log                 轮转日志
 
 资料库页面的下拉框状态由当前报告集合参与键值计算。文件集合变化时组件重建，从根源上避免已删除报告继续显示；同时清除会话里的失效资产引用。资料库的手动推送会在会话索引中回查资产路径：找到来源会话时复用首页的 external ID；没有会话来源的手工文件则使用路径摘要形成稳定的 library ID。
 
+搜索快照和研究报告以原始 Markdown（兼容已有 TXT/JSON 资产）作为资料库中的单一事实来源。展示层通过共享下载菜单调用 `infrastructure/report_export.py`，仅在用户选择下载时即时转换为 Markdown、Word、PDF、TXT、JSON 或 HTML；转换结果按内容和格式缓存，但不会写回资料库，也不会改变 CustomerService 推送使用的原始资产。
+
 ## 9. CustomerService 投递
 
 搜索快照、研究报告和自动任务报告统一转换为 `DeliveryArtifact`。`CustomerServicePublisher`：
@@ -291,14 +304,15 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 ## 11. 配置与密钥
 
-`load_settings()` 的优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入模型、Brave 和联动凭据。
+`load_settings()` 的优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入研究模型、快速回答模型、Brave 和联动凭据。
 
-`save_settings()` 使用进程内锁、临时文件和原子替换。模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。
+`save_settings()` 使用进程内锁、临时文件和原子替换。研究/快速回答模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。快速回答 API Key 只从 `DEEPSEARCH_CHAT_API_KEY` 或 Streamlit Secrets 读取；即使手工写进 JSON 也会被忽略。
 
 模型超时与网页超时是独立参数：
 
 - `Settings.request_timeout`：搜索和抓取，默认 8 秒；
-- `LLMSettings.request_timeout`：每次模型请求，默认 180 秒。
+- `Settings.llm.request_timeout`：每次研究模型请求，默认 180 秒；
+- `Settings.chat_llm.request_timeout`：每次快速回答模型请求，默认 30 秒。
 
 ## 12. 扩展点
 
@@ -307,6 +321,7 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 | 新搜索源 | 实现 `SearchProvider`，在组合根注册 |
 | 新正文读取器 | 实现 `SourceFetcher` |
 | 新路由策略 | 扩展或替换 `IntentClassifier` |
+| 新快速回答模型服务 | 保持 Chat Completions 兼容，配置独立 `chat_llm`；不得借用研究模型 |
 | 新规划/停止策略 | 实现 `Planner` |
 | 新报告生成器 | 实现 `Reporter`，继续接受结构化来源和计划 |
 | 新质量规则 | 扩展 `AnswerValidator` 或实现 `QualityEvaluatorPort` |
@@ -318,6 +333,7 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 - 在线路径永远不能静默混入 Mock。
 - 研究缺少模型时必须在任何检索前失败。
+- 快速回答模型不可用时只能使用本地能力或明确降级，不得调用搜索/研究；直接回答不得生成或投递资产。
 - 不通过质量门的报告不得保存或投递。
 - 会话、配置和 outbox 不得持久化密钥或完整网页正文。
 - 并发完成顺序不得影响稳定排序和来源编号。
@@ -326,6 +342,6 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 ## 14. Community Cloud 部署边界
 
-公开托管使用 `streamlit_app.py` 作为入口，`requirements.txt` 通过 `-e .[ui]` 安装当前包。`.streamlit/config.toml` 可以进入仓库；`.streamlit/secrets.toml`、`.env` 与 `config.json` 必须保持未跟踪。云端凭据只由 Streamlit Secrets 注入现有配置合并链路。
+公开托管使用 `streamlit_app.py` 作为入口，`requirements.txt` 直接声明 `trafilatura`、`pypdf` 和 Streamlit 运行依赖；仓库根目录本身由 Python 导入路径加载，不依赖可编辑安装。`.streamlit/config.toml` 可以进入仓库；`.streamlit/secrets.toml`、`.env` 与 `config.json` 必须保持未跟踪。云端实例不会读取开发者电脑的本地 Secrets，研究和快速回答模型凭据都必须在应用 Settings → Secrets 中单独配置。
 
 Community Cloud 的本地文件系统属于实例运行环境，不是持久数据层。现有 `JsonConversationStore`、`FileReportStorage`、`FileArtifactTrash`、文件缓存、outbox 和任务状态仍可在单个实例生命周期内工作，但不能保证跨重启、重新部署或休眠恢复。要把云端版本用于长期生产数据，必须通过现有端口抽象接入外部数据库、对象存储和可恢复任务执行器，不能把当前文件适配器误当作持久服务。

@@ -65,6 +65,10 @@ class Settings:
     log_level: str = "INFO"
     config_path: Path = Path("config.json")
     llm: LLMSettings = field(default_factory=LLMSettings)
+    # 快速回答模型使用独立连接与额度；空值表示只使用本地确定性回复。
+    chat_llm: LLMSettings = field(default_factory=lambda: LLMSettings(
+        base_url="", model="", request_timeout=30.0,
+    ))
     customer_service: CustomerServiceSettings = field(default_factory=CustomerServiceSettings)
     topics: list[dict[str, Any]] = field(default_factory=list)
 
@@ -73,6 +77,10 @@ class Settings:
             self.runtime_mode = "mock" if self.mode == "mock" else "online"
         if self.runtime_mode not in {"online", "mock"}:
             raise ValueError("runtime_mode 必须是 online 或 mock")
+        # 2.2 早期版本曾允许把 chat 设为默认手动模式；现在直接回答只由
+        # 智能判断触发，读取旧配置时无损迁移为 auto。
+        if self.default_work_mode == "chat":
+            self.default_work_mode = "auto"
         if self.default_work_mode not in {"auto", "search", "research"}:
             raise ValueError("default_work_mode 必须是 auto、search 或 research")
         self.mode = "mock" if self.runtime_mode == "mock" else "auto"
@@ -94,6 +102,16 @@ class Settings:
         """判断当前是否只能使用确定性演示报告器。"""
 
         return self.runtime_mode == "mock" or not self.llm.api_key
+
+    @property
+    def chat_model_available(self) -> bool:
+        """快速回答模型只有在独立连接参数齐全且非演示模式时才可调用。"""
+
+        return self.runtime_mode != "mock" and all((
+            self.chat_llm.api_key,
+            self.chat_llm.base_url,
+            self.chat_llm.model,
+        ))
 
 
 def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
@@ -119,6 +137,18 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
                     llm_raw.get("request_timeout", llm_defaults.request_timeout),
                 )
             ),
+        ),
+    )
+    chat_raw = raw.get("chat_llm", {})
+    # 快速回答供应商没有默认值；API Key 只能来自进程环境（Web 端还会
+    # 单独合并 Streamlit Secrets），config.json 中即使出现 key 也忽略。
+    chat_llm = LLMSettings(
+        base_url=os.getenv("DEEPSEARCH_CHAT_BASE_URL", str(chat_raw.get("base_url", ""))),
+        model=os.getenv("DEEPSEARCH_CHAT_MODEL", str(chat_raw.get("model", ""))),
+        api_key=os.getenv("DEEPSEARCH_CHAT_API_KEY", ""),
+        request_timeout=max(
+            1.0,
+            float(os.getenv("DEEPSEARCH_CHAT_TIMEOUT", chat_raw.get("request_timeout", 30.0))),
         ),
     )
     reports_value = raw.get("reports_dir", "reports")
@@ -190,6 +220,7 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         log_level=raw.get("log_level", "INFO"),
         config_path=config_path,
         llm=llm,
+        chat_llm=chat_llm,
         customer_service=customer_service,
         topics=list(raw.get("research_tasks", raw.get("topics", []))),
     )
@@ -226,6 +257,13 @@ def save_settings(settings: Settings) -> None:
             "model": settings.llm.model,
             "request_timeout": settings.llm.request_timeout,
             # 密钥只属于环境变量或 Streamlit Secrets，禁止写入 config.json。
+            "api_key": "",
+        },
+        "chat_llm": {
+            "base_url": settings.chat_llm.base_url,
+            "model": settings.chat_llm.model,
+            "request_timeout": settings.chat_llm.request_timeout,
+            # 快速回答模型也严格禁止把 API Key 持久化到普通配置。
             "api_key": "",
         },
         "customer_service": {

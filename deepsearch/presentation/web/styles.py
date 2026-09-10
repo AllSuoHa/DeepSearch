@@ -12,9 +12,10 @@ from pathlib import Path
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-# 产品标志、折叠侧栏图标和助手头像共用一个 Material Symbol，避免
-# 同一页面同时出现放大镜、方框 Logo 与机器人三套视觉语言。
+# 产品/助手继续使用原有的 Material 图标；用户头像单独使用本地 SVG，
+# 避免两个角色共用同一视觉标识。
 ASSISTANT_ICON = ":material/travel_explore:"
+USER_ICON = str(PROJECT_ROOT / "assets" / "user-avatar.svg")
 
 
 def inject_app_css() -> None:
@@ -65,10 +66,10 @@ def render_page_header(kicker: str, title: str, subtitle: str) -> None:
     st.space("small")
 
 
-def render_scorecard(scorecard) -> None:
+def render_scorecard(scorecard, key: str = "scorecard") -> None:
     """用总分、分项进度和建议展示可解释的研究质量。"""
 
-    with st.container(key="scorecard", border=True):
+    with st.container(key=key, border=True):
         lead, detail = st.columns([1, 2.5], gap="large", vertical_alignment="center")
         with lead:
             st.caption("综合研究质量")

@@ -1,1 +1,6 @@
--e .[ui]
+# Streamlit Cloud/runtime dependencies; local development uses .[dev].
+trafilatura>=2,<3
+pypdf>=6,<7
+python-docx>=1.1,<2
+reportlab>=4,<5
+streamlit>=1.62,<2

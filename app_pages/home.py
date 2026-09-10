@@ -1,22 +1,28 @@
-"""ChatGPT 风格的统一搜索与研究工作台。"""
+"""ChatGPT 风格的统一直接回答、搜索与研究工作台。"""
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
-from urllib.parse import urlsplit
+from uuid import uuid4
 
 import streamlit as st
 
 from deepsearch.domain.models import AgentRequest, AgentRunResult, ReportSpecification, ResearchBrief, WorkMode
 from deepsearch.infrastructure.customer_service import CustomerServicePublisher, DeliveryArtifact, DeliveryError
-from deepsearch.presentation.web.delivery import conversation_delivery_external_id
+from deepsearch.presentation.web.delivery import (
+    DATA_CLASSIFICATION_OPTIONS,
+    conversation_delivery_external_id,
+    data_classification_value,
+)
+from deepsearch.presentation.web.report_downloads import render_report_download_menu
 from deepsearch.presentation.web.scroll_controls import render_scroll_controls
-from deepsearch.presentation.web.styles import ASSISTANT_ICON, inject_shortcut_tooltips, render_scorecard
+from deepsearch.presentation.web.search_results import render_search_response
+from deepsearch.presentation.web.styles import ASSISTANT_ICON, USER_ICON, inject_shortcut_tooltips, render_scorecard
 from deepsearch.presentation.web.support import (
     RunProgressSnapshot,
     RunProgressTracker,
     background_executor,
+    chat_history_from_messages,
     create_agent,
     format_elapsed,
     get_settings,
@@ -25,10 +31,16 @@ from deepsearch.presentation.web.support import (
     progress_details_markdown,
     prompt_shortcut_store,
     record_delivery,
+    run_from_message,
+    stable_message_id,
     wait_for_background_result,
 )
 
-MODE_LABELS = {"智能判断": WorkMode.AUTO, "搜索": WorkMode.SEARCH, "研究": WorkMode.RESEARCH}
+MODE_LABELS = {
+    "智能判断": WorkMode.AUTO,
+    "搜索": WorkMode.SEARCH,
+    "研究": WorkMode.RESEARCH,
+}
 
 
 def fill_composer(prompt: str, shortcut_id: str) -> None:
@@ -42,6 +54,7 @@ def prepare_run() -> None:
     """输入提交前标记待执行，使同一轮页面能立即渲染可靠的停止按钮。"""
 
     st.session_state.agent_run_state = "pending"
+    st.session_state.pending_run_id = uuid4().hex
 
 
 def request_run_stop() -> None:
@@ -62,39 +75,27 @@ def queue_run(question: str, mode: WorkMode) -> None:
     prepare_run()
 
 
-def render_search(run) -> None:
-    response = run.search
-    st.markdown(response.answer)
-    if response.warnings:
-        for warning in response.warnings:
-            st.caption(f":material/info: {warning}")
-    grouped = {}
-    for item in response.items:
-        grouped.setdefault(item.resource_type, []).append(item)
-    for group, items in grouped.items():
-        st.markdown(f"#### {group}")
-        for index, item in enumerate(items):
-            host = urlsplit(item.url).netloc.removeprefix("www.")
-            with st.container(border=True, key=f"result-card-{hashlib.sha1(item.url.encode()).hexdigest()[:12]}-{index}"):
-                st.markdown(f"**[{item.title}]({item.url})**")
-                with st.container(horizontal=True):
-                    color = "green" if item.risk_level == "可信来源" else "orange" if item.risk_level == "谨慎访问" else "gray"
-                    st.badge(item.risk_level, color=color)
-                    st.caption(f"{host} · {item.provider}" + (f" · {item.published_at}" if item.published_at else ""))
-                if item.snippet:
-                    st.caption(item.snippet)
-                if item.risk_reasons:
-                    st.warning("；".join(item.risk_reasons), icon=":material/shield:")
-                if item.url.startswith(("http://", "https://")):
-                    st.link_button("打开链接", item.url, icon=":material/open_in_new:")
-                else:
-                    st.button("演示占位链接", disabled=True, icon=":material/science:", key=f"mock-link-{index}-{hashlib.sha1(item.url.encode()).hexdigest()[:10]}")
+def render_chat(run) -> None:
+    """直接回答是普通助手消息，不附带搜索或研究专属模块。"""
+
+    st.markdown(run.chat.answer)
 
 
-def render_research(run) -> None:
+def render_search(run, message_key: str = "latest") -> None:
+    render_search_response(run.search, message_key)
+
+
+def render_research(run, message_key: str = "latest") -> None:
     result = run.research
-    st.markdown(result.report)
-    with st.expander("证据详情与审校", icon=":material/fact_check:"):
+    # 报告正文单独拥有稳定容器，便于在历史消息和流式结束后的重绘中
+    # 保持一致的阅读样式，同时不影响搜索卡片和直接回答。
+    with st.container(key=f"research-report-{message_key}"):
+        st.markdown(result.report)
+    with st.expander(
+        "证据详情与审校",
+        icon=":material/fact_check:",
+        key=f"evidence-{message_key}",
+    ):
         with st.container(horizontal=True):
             st.badge(f"{len(result.sources)} 个来源", color="blue")
             st.badge(f"{result.rounds} 轮", color="gray")
@@ -103,12 +104,25 @@ def render_research(run) -> None:
             st.markdown("**独立审校处理**")
             for issue in result.review_summary:
                 st.markdown(f"- {issue}")
-        render_scorecard(result.scorecard)
+        if result.sources:
+            st.markdown("**来源链接**")
+            for source in result.sources:
+                if source.url.startswith(("http://", "https://")):
+                    st.markdown(f"{source.source_id}. [{source.title}]({source.url})")
+                else:
+                    st.caption(f"{source.source_id}. {source.title} · 无可访问链接")
+        if result.scorecard.dimensions:
+            render_scorecard(result.scorecard, key=f"scorecard-{message_key}")
         for trace in result.trace:
             st.caption(f"第 {trace.round_number} 轮 · {trace.decision}")
 
 
 def render_actions(run) -> None:
+    if run.chat is not None:
+        # 直接回答已经完成用户当前意图，不再用升级按钮暗示简单问题
+        # 必须转成搜索或研究。
+        return
+
     artifact_path = run.artifact_path
     if artifact_path is None or not Path(artifact_path).is_file():
         return
@@ -123,14 +137,8 @@ def render_actions(run) -> None:
         gap="xsmall",
         key="result-actions",
     ):
-        st.download_button(
-            "下载",
-            data=content.encode("utf-8"),
-            file_name=Path(artifact_path).name,
-            mime="text/markdown",
-            icon=":material/download:",
-            width="content",
-        )
+        title = run.search.query if run.search is not None else run.research.question
+        render_report_download_menu(content, title, f"home-{Path(artifact_path).stem}")
         with st.popover("复制", icon=":material/content_copy:", width=104, wrap=False):
             st.caption("使用右上角复制按钮")
             st.code(content, language="markdown", height=180)
@@ -160,7 +168,7 @@ def render_actions(run) -> None:
                 st.caption("请在 `.streamlit/secrets.toml` 配置联动密钥后重启页面。")
             else:
                 classification = st.segmented_control(
-                    "文档密级", ["public", "internal", "confidential"], default="internal",
+                    "文档密级", DATA_CLASSIFICATION_OPTIONS, default="内部",
                     key="manual-delivery-classification",
                 )
                 if st.button("确认推送", type="primary", icon=":material/send:"):
@@ -173,7 +181,7 @@ def render_actions(run) -> None:
                         content_path=Path(artifact_path),
                         question=question,
                         kind=kind,
-                        data_classification=str(classification or "internal"),
+                        data_classification=data_classification_value(classification),
                         metadata={"resolved_mode": run.resolved_mode.value},
                     )
                     try:
@@ -216,7 +224,7 @@ elif st.session_state.agent_run_state == "running":
 if not st.session_state.messages:
     st.space("large")
     with st.container(horizontal_alignment="center", key="empty-state"):
-        # 固定宽度内层容器让 SVG 与标题共用同一视觉中线。
+        # 固定宽度内层容器让图标与标题共用同一视觉中线。
         with st.container(horizontal_alignment="center", width=64, key="home-logo"):
             st.markdown(ASSISTANT_ICON)
         # 欢迎语不是正文目录标题，不需要可复制的 URL 锚点。关闭锚点也
@@ -307,22 +315,21 @@ if not st.session_state.messages:
                             st.toast("快捷输入已删除。", icon=":material/delete:")
                             st.rerun()
 else:
-    latest_run = st.session_state.get("last_run")
     with st.container(key="conversation-thread"):
         for index, message in enumerate(st.session_state.messages):
             role = message.get("role", "assistant")
+            message_key = stable_message_id(message, index)
             with st.chat_message(
                 role,
-                avatar=ASSISTANT_ICON if role == "assistant" else None,
+                avatar=ASSISTANT_ICON if role == "assistant" else USER_ICON,
             ):
-                if message.get("role") == "assistant" and index == len(st.session_state.messages) - 1 and latest_run is not None:
-                    # Avoid a module-level conditional expression here: Streamlit's
-                    # magic renderer would display the render function's ``None``
-                    # return value below restored conversations.
-                    if latest_run.search is not None:
-                        render_search(latest_run)
-                    else:
-                        render_research(latest_run)
+                message_run = run_from_message(st.session_state.messages, index)
+                if message_run is not None and message_run.chat is not None:
+                    render_chat(message_run)
+                elif message_run is not None and message_run.search is not None:
+                    render_search(message_run, message_key)
+                elif message_run is not None and message_run.research is not None:
+                    render_research(message_run, message_key)
                 else:
                     st.markdown(message.get("content", ""))
 
@@ -335,7 +342,7 @@ stop_button_slot = None
 with st.bottom:
     with st.container(key="composer-shell"):
         typed = st.chat_input(
-            "输入你想搜索或研究的问题…",
+            "输入想问、搜索或研究的问题…",
             key="assistant-chat",
             max_chars=1600,
             submit_mode="disable",
@@ -388,31 +395,34 @@ pending_work_mode = st.session_state.pop("pending_work_mode", "")
 
 if prompt:
     prompt = str(prompt).strip()
+    run_id = str(st.session_state.pop("pending_run_id", "")) or uuid4().hex
     st.session_state.agent_run_state = "running"
     requested_mode = WorkMode(pending_work_mode) if pending_work_mode else MODE_LABELS.get(selected_mode, WorkMode.AUTO)
-    user_message = {"role": "user", "content": prompt, "mode": requested_mode.value}
+    user_message_id = uuid4().hex
+    user_message = {
+        "message_id": user_message_id,
+        "role": "user",
+        "content": prompt,
+        "mode": requested_mode.value,
+    }
     st.session_state.messages.append(user_message)
-    persist_user_message(prompt, requested_mode)
-    with st.chat_message("user"):
+    persist_user_message(prompt, requested_mode, user_message_id)
+    with st.chat_message("user", avatar=USER_ICON):
         st.markdown(prompt)
     with st.chat_message("assistant", avatar=ASSISTANT_ICON):
         tracker = RunProgressTracker("正在理解你的需求并准备运行…")
         st.session_state.active_run_tracker = tracker
-        status = st.status("正在执行 · 准备任务 · 已用时 0 秒", expanded=False, type="compact")
-        with status:
-            progress_detail = st.empty()
+        # 状态容器本身在运行期间保持稳定，只更新内部占位符。过去每秒
+        # status.update(label=...) 都会重建折叠头，导致用户刚展开又收起。
+        with st.container(key=f"thinking-{run_id}"):
+            status = st.status("思考中 · 点击查看步骤", expanded=False, type="compact")
+            with status:
+                progress_detail = st.empty()
         progress_detail.markdown(progress_details_markdown(tracker.snapshot()))
 
         def render_progress(snapshot: RunProgressSnapshot) -> None:
             """仅在页面线程更新 UI；后台 Agent 只写入 tracker。"""
 
-            status.update(
-                label=(
-                    f"正在执行 · {snapshot.current_stage} · "
-                    f"已用时 {format_elapsed(snapshot.total_seconds)}"
-                ),
-                state="running",
-            )
             progress_detail.markdown(progress_details_markdown(snapshot))
 
         specification = ReportSpecification(
@@ -438,6 +448,9 @@ if prompt:
                 brief=brief,
                 region={"中国大陆": "CN", "美国": "US", "全球": "ALL"}[region_label],
                 conversation_id=st.session_state.current_conversation_id,
+                # 当前用户消息已经加入列表，因此从切片中排除它；辅助函数
+                # 还会限制条数与长度，避免整份历史进入轻量模型。
+                chat_history=chat_history_from_messages(st.session_state.messages[:-1]),
             )
 
             def execute_run() -> AgentRunResult:
@@ -450,7 +463,7 @@ if prompt:
 
             future = background_executor().submit(execute_run)
             run = wait_for_background_result(future, tracker, render_progress)
-            assistant_message = persist_run_result(run)
+            assistant_message = persist_run_result(run, run_id)
         except Exception as exc:
             st.session_state.agent_run_state = "idle"
             st.session_state.active_run_tracker = None
@@ -462,7 +475,6 @@ if prompt:
                     f"用时 {format_elapsed(failed.total_seconds)}"
                 ),
                 state="error",
-                expanded=False,
             )
             if stop_button_slot is not None:
                 stop_button_slot.empty()
@@ -473,7 +485,11 @@ if prompt:
             st.session_state.agent_run_state = "idle"
             st.session_state.active_run_tracker = None
             completed = tracker.finish()
-            completed_mode = "搜索" if run.resolved_mode == WorkMode.SEARCH else "研究"
+            completed_mode = {
+                WorkMode.CHAT: "直接回答",
+                WorkMode.SEARCH: "搜索",
+                WorkMode.RESEARCH: "研究",
+            }[run.resolved_mode]
             progress_detail.markdown(progress_details_markdown(completed))
             status.update(
                 label=(
@@ -481,17 +497,18 @@ if prompt:
                     f"用时 {format_elapsed(completed.total_seconds)}"
                 ),
                 state="complete",
-                expanded=False,
             )
             if stop_button_slot is not None:
                 stop_button_slot.empty()
             st.session_state.last_run = run
             st.session_state.last_result = run.research
             st.session_state.messages.append(assistant_message)
-            if run.search is not None:
-                render_search(run)
+            if run.chat is not None:
+                render_chat(run)
+            elif run.search is not None:
+                render_search(run, run_id)
             else:
-                render_research(run)
+                render_research(run, run_id)
 
 last_run = st.session_state.get("last_run")
 if last_run is not None and st.session_state.messages:

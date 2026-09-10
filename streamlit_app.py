@@ -48,7 +48,7 @@ with st.sidebar:
         link=None,
         icon_image=ASSISTANT_ICON,
     )
-    st.caption("个人 AI 搜索与研究助手")
+    st.caption("个人 AI 问答、搜索与研究助手")
     if st.button("新对话", icon=":material/edit_square:", width="stretch", type="primary"):
         reset_research()
         st.switch_page("app_pages/home.py")
@@ -71,9 +71,16 @@ with st.sidebar:
         icon=":material/history:",
         width="stretch",
     )
-    with st.container(horizontal=True):
+    with st.container(horizontal=True, wrap=True):
         st.badge("演示数据" if settings.mock_search else "在线", color="violet" if settings.mock_search else "green")
-        st.badge("模型可用" if not settings.mock_llm else "仅搜索", color="blue" if not settings.mock_llm else "gray")
+        st.badge(
+            "研究模型可用" if not settings.mock_llm else "研究未配置",
+            color="blue" if not settings.mock_llm else "gray",
+        )
+        st.badge(
+            "快速回答模型可用" if settings.chat_model_available else "本地基础回答",
+            color="green" if settings.chat_model_available else "gray",
+        )
     st.space("small")
     st.caption(f"v{__version__} · 本地优先")
 

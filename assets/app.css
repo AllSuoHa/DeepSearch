@@ -213,9 +213,135 @@ h2, h3 {
   margin-top: .18rem;
 }
 
+/* Material 图标的默认聊天头像容器是圆角方框；项目图标本身已经足够
+   清晰，因此去掉外层装饰，避免助手头像和用户的圆形线框产生两套边框。 */
+[data-testid="stChatMessageAvatarCustom"] {
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* 保留项目图标本身的形状，只放大 Material Symbol 的绘制区域，使它
+   与 48px SVG 缩放后的用户头像保持接近的视觉重量。 */
+[data-testid="stChatMessageAvatarCustom"] [data-testid="stIconMaterial"] {
+  width: 2rem !important;
+  height: 2rem !important;
+  font-size: 2rem !important;
+  line-height: 1 !important;
+}
+
 [data-testid="stStatusWidget"],
 [data-testid="stExpander"] {
   border-color: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* 研究报告使用独立的正文容器，提升长文的段落节奏、标题层级和引用
+   可扫描性；证据详情仍由下方独立的 expander 管理。 */
+[class*="st-key-research-report-"] {
+  margin-bottom: .35rem;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] {
+  color: var(--text-color);
+  font-size: 1rem;
+  line-height: 1.78;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] h1 {
+  margin: 0 0 1.15rem;
+  padding-bottom: .72rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  font-size: 1.55rem;
+  line-height: 1.35 !important;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] h2 {
+  margin: 1.65rem 0 .62rem;
+  padding-left: .7rem;
+  border-left: 3px solid color-mix(in srgb, currentColor 62%, transparent);
+  font-size: 1.18rem;
+  line-height: 1.45 !important;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] h3 {
+  margin: 1.2rem 0 .45rem;
+  font-size: 1.04rem;
+  line-height: 1.5 !important;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] p {
+  margin: .72rem 0;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] ul,
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] ol {
+  margin: .65rem 0 1rem;
+  padding-left: 1.45rem;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] li {
+  margin: .34rem 0;
+  padding-left: .18rem;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] blockquote {
+  margin: 1rem 0;
+  padding: .7rem 1rem;
+  border-left: 3px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] a {
+  color: var(--primary-color, currentColor);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] table {
+  width: 100%;
+  margin: 1rem 0;
+  border-collapse: collapse;
+  font-size: .94rem;
+  line-height: 1.6;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] th,
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] td {
+  padding: .58rem .7rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] th {
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  font-weight: 500;
+}
+
+[class*="st-key-research-report-"] [data-testid="stMarkdownContainer"] code {
+  padding: .12rem .32rem;
+  border-radius: 5px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  font-size: .9em;
+}
+
+[class*="st-key-evidence-"] {
+  margin-top: .65rem;
+  border-radius: 14px;
+}
+
+[class*="st-key-evidence-"] [data-testid="stExpanderDetails"] {
+  padding-top: .8rem;
+}
+
+[class*="st-key-evidence-"] [data-testid="stMarkdownContainer"] {
+  line-height: 1.62;
+}
+
+[class*="st-key-evidence-"] [data-testid="stMarkdownContainer"] p {
+  margin: .55rem 0;
 }
 
 [class*="st-key-result-card-"] {
@@ -223,6 +349,120 @@ h2, h3 {
   border-radius: 14px;
   background: color-mix(in srgb, var(--background-color, #fff) 98%, currentColor 2%);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .045);
+}
+
+/* 资料库工具栏保持单行、低视觉重量；窄屏由 Streamlit 自动换行。 */
+.st-key-history-filter-bar {
+  padding: .2rem 0 .35rem;
+}
+
+.st-key-history-filter-bar [data-testid="stTextInputRootElement"],
+.st-key-history-filter-bar [data-testid="stSelectbox"] > div > div {
+  min-height: 2.6rem;
+}
+
+.st-key-history-bulk-actions {
+  min-height: 2.2rem;
+  margin: -.15rem 0 .45rem;
+}
+
+.st-key-history-bulk-actions [data-testid="stCaptionContainer"] {
+  margin-right: .15rem;
+  white-space: nowrap;
+}
+
+.st-key-history-bulk-actions button {
+  min-height: 2.15rem;
+  padding-top: .32rem;
+  padding-bottom: .32rem;
+  white-space: nowrap;
+}
+
+/* 修改名称保留 120 字符校验，但不显示 Streamlit 自动生成的
+   “回车提交 / 当前字数”说明，避免它挤占推送弹层的紧凑布局。 */
+[class*="st-key-history-rename-title-"] [data-testid="InputInstructions"] {
+  display: none;
+}
+
+/* 分类面板采用紧凑表格节奏，不再把每个报告渲染成一张大卡片。 */
+[class*="st-key-history-report-group-"] {
+  margin-bottom: .55rem;
+}
+
+[class*="st-key-history-report-group-"] [data-testid="stExpanderDetails"] {
+  padding: .25rem .8rem .45rem;
+}
+
+/* Expander 内容区默认会在每个报告行之间插入 1rem gap。分隔线位于
+   下一行顶部时，这段空白会全部出现在上一行下方，造成内容看起来
+   向上偏移。清除列表层的间距后，每行内容才真正位于两条分隔线中间。 */
+[class*="st-key-history-report-group-"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] {
+  gap: 0 !important;
+}
+
+[class*="st-key-history-report-header-"] {
+  padding: .15rem .35rem .25rem;
+}
+
+[class*="st-key-history-report-row-"] {
+  padding: .2rem .35rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stHorizontalBlock"] {
+  align-items: center;
+}
+
+[class*="st-key-history-report-row-"] {
+  gap: 0 !important;
+  justify-content: center;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+  min-height: 1.75rem;
+  justify-content: center;
+  gap: 0;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stMarkdownContainer"] p {
+  margin: 0;
+  font-size: .92rem;
+  line-height: 1.3;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stMarkdownContainer"] {
+  margin: 0 !important;
+}
+
+[class*="st-key-history-report-select-"] [data-testid="stElementContainer"],
+[class*="st-key-history-report-select-"] [data-testid="stCheckbox"],
+[class*="st-key-history-report-select-"] [data-testid="stCheckbox"] label {
+  width: 100% !important;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stCheckbox"] {
+  min-height: 1.75rem;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stCheckbox"] label {
+  min-height: 1.75rem;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  justify-content: center;
+}
+
+[class*="st-key-history-report-row-"] [data-testid="stCheckbox"] label > div:not([data-testid]) {
+  margin: 0 !important;
+}
+
+.st-key-history-current-actions [data-testid="stPopover"] > button {
+  justify-content: center;
 }
 
 .st-key-result-actions {
@@ -261,5 +501,13 @@ h2, h3 {
 
   .st-key-composer-toolbar {
     padding-inline: .2rem;
+  }
+
+  [class*="st-key-history-report-group-"] [data-testid="stExpanderDetails"] {
+    padding-inline: .45rem;
+  }
+
+  [class*="st-key-history-report-row-"] {
+    padding-inline: .1rem;
   }
 }

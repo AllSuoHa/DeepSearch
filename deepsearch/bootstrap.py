@@ -1,14 +1,15 @@
 """应用组合根：在这里把业务用例和具体技术实现装配起来。
 
-应用层只描述“研究如何进行”，并不知道 DuckDuckGo、磁盘缓存或
+应用层描述直接回答、搜索和研究如何进行，并不知道 DuckDuckGo、磁盘缓存或
 Markdown 文件的存在。所有具体实现都在本文件集中创建和注入，因此
-替换搜索源、模型或存储时，不需要修改研究主循环。
+替换搜索源、模型或存储时，不需要修改各用例主流程。
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 
+from .application.chat_service import ChatService
 from .application.errors import ResearchModelRequiredError
 from .application.evaluation import ResearchQualityEvaluator
 from .application.intent import IntentClassifier
@@ -114,15 +115,33 @@ class DeepSearchAgent:
             [] if settings.mock_search else [OpenAlexSearch(settings.request_timeout), CrossrefSearch(settings.request_timeout)],
             mock_mode=settings.mock_search,
         )
+        # 快速回答模型使用独立配置实例；未配置时由 ChatService 本地降级，
+        # 绝不会复用研究模型或消耗研究模型额度。
+        chat_model = OpenAICompatibleLLM(settings.chat_llm) if settings.chat_model_available else None
+        self._chat_service = ChatService(chat_model)
         self._classifier = IntentClassifier()
 
     def run(self, request: AgentRequest, progress=None) -> AgentRunResult:
-        """统一执行搜索或研究；显式模式优先于智能判断。"""
+        """统一执行直接回答、搜索或研究；显式搜索/研究优先。"""
 
         requested = request.mode if isinstance(request.mode, WorkMode) else WorkMode(str(request.mode))
         resolved = self._classifier.resolve(request.question, requested)
         notify = progress or (lambda phase, message: None)
-        notify("route", f"已选择{ '搜索' if resolved == WorkMode.SEARCH else '研究' }模式")
+        mode_name = {
+            WorkMode.CHAT: "直接回答",
+            WorkMode.SEARCH: "搜索",
+            WorkMode.RESEARCH: "研究",
+        }[resolved]
+        notify("route", f"已选择{mode_name}模式")
+        if resolved == WorkMode.CHAT:
+            chat = self._chat_service.reply(
+                request.question,
+                request.chat_history,
+                notify,
+                locale=request.locale,
+                region=request.region,
+            )
+            return AgentRunResult(requested, resolved, chat=chat)
         if resolved == WorkMode.SEARCH:
             notify("search", "正在检索并整理可直接访问的结果…")
             response = self._search_service.search(request.question, locale=request.locale, region=request.region)

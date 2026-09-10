@@ -1,6 +1,6 @@
 # DeepSearch 2.2 用户手册
 
-> 适用版本：2.2.0 · 最后校准：2026-09-07
+> 适用版本：2.2.0 · 最后校准：2026-09-10
 
 ## 1. 安装与启动
 
@@ -28,10 +28,11 @@ deepsearch --mock web
 ## 2. 第一次使用
 
 1. 打开“设置 → 搜索”，确认数据来源是“在线”；没有 Brave Key 也能使用免费来源。
-2. 只找链接或资源时，可直接回到“对话”并选择“搜索”。
-3. 需要研究报告时，在“设置 → 研究模型”确认模型状态为“模型可用”。
-4. 在输入区选择“智能判断”“搜索”或“研究”，输入问题后发送。
-5. 完成后可下载、复制、继续追问、切换模式重跑或推送结果。
+2. 时间、计算、问候、翻译和普通问答保持“智能判断”，系统会自动直接回答。
+3. 只找链接或资源时，可直接回到“对话”并选择“搜索”。
+4. 需要研究报告时，在“设置 → 研究与快速回答模型”确认研究模型状态为“模型可用”。
+5. 输入区只需选择“智能判断”“搜索”或“研究”，输入问题后发送。
+6. 搜索和研究结果可下载、继续追问或按配置推送；历史回答会保留各自来源链接。
 
 ## 3. 如何选择模式
 
@@ -39,11 +40,18 @@ deepsearch --mock web
 
 系统用可解释关键词做低成本路由：
 
-- “链接、官网、资源、哪里看、下载、找一下”等请求倾向搜索；
+- “现在几点、计算、翻译、你好、你能做什么”等请求倾向直接回答；
+- “链接、官网、资源、价格、天气、新闻、当前状态”等请求倾向搜索；
 - “论文、比较、研究、调研、综述、报告、分析”等请求倾向研究；
-- 两类信号相同或没有明显信号时，选择成本较低的搜索。
+- 没有实时检索或深度研究信号时，默认直接回答，不会为了使用搜索而扩大问题。
 
-智能判断不会覆盖用户的显式选择。
+智能判断不会覆盖用户显式选择的搜索或研究。
+
+### 直接回答
+
+适合本地时间、简单计算、翻译、普通常识、问候和功能咨询。时间与计算优先使用本地确定性能力；配置独立的快速回答模型后可生成其他自然短回复。
+
+直接回答由“智能判断”自动匹配，没有单独的手动选项。天气、价格、新闻、政策和官网链接等网页实时事实进入搜索；明确的比较、调研和报告请求进入研究。直接回答会保存在会话中，但不会生成搜索快照、研究报告或资料库资产。
 
 ### 搜索
 
@@ -90,13 +98,13 @@ deepsearch --mock web
 
 ### 运行和停止
 
-运行状态默认折叠，标题显示当前阶段和累计用时。研究计算在有限后台线程池中执行，页面线程对齐任务启动时间每秒更新一次，因此没有新阶段事件时计时也会按 0、1、2… 秒连续变化；阶段变化会立即刷新，不必等待下一秒。
+运行状态默认折叠，使用稳定的“思考中”标题。研究计算在有限后台线程池中执行，页面线程会更新折叠区内部的当前阶段和累计用时，不重建折叠标题。
 
-展开状态中的“思考步骤与说明”会列出准备任务、制定计划、搜索来源、读取正文、评估证据、交叉验证、整理证据、生成初稿、审校报告、验证报告等实际经过的高层步骤。每步都有最新说明和独立用时；补充检索等真实循环可以再次出现。这里展示的是可审计的任务阶段，不是模型隐性思维链。
+展开状态中的“思考步骤与说明”按实际模式展示：直接回答通常只有“理解问题 → 生成直接回复”，搜索增加检索与保存步骤，研究才显示规划、读取正文、评估证据、交叉验证、初稿、审校和质量检查。用户展开后，运行中的内容更新不会自动收起；只有用户主动点击才会收起。这里展示的是可审计的任务阶段，不是模型隐性思维链。
 
 输入区会在运行时出现“停止生成”按钮。任务成功或失败后，页面会立即清除这个按钮；聊天输入自身在脚本结束后恢复正常提交状态。停止仍是协作式取消：系统会在下一个阶段边界中止后台任务，但若程序正阻塞在一次 HTTP 调用中，需要等该调用返回或超时后才能观察到停止信号。未完成内容不会保存为正式资产。
 
-最终研究报告不使用 token 级流式输出。它必须先完成证据整理、初稿、独立审校和确定性质量门，校验通过后才一次性展示；这样不会把尚未审校或最终会被拒绝的文本提前呈现给用户。运行过程仍会通过每秒计时和阶段说明实时反馈。
+结果正文不使用 token 级流式输出。研究必须先完成证据整理、初稿、独立审校和确定性质量门；直接回复会完整返回后再持久化。运行过程仍通过阶段说明和计时反馈。
 
 ### 页面滚动
 
@@ -155,7 +163,7 @@ deepsearch --mock web
 - `data/artifacts/` 中的搜索 Markdown 快照；
 - `reports/` 中的 Markdown、Text、JSON 研究报告。
 
-支持按文件名或正文搜索、预览、下载和推送。选择资产后，操作栏的“推送”按钮可以设置 `public`、`internal` 或 `confidential` 密级并发送到 CustomerService；未启用联动时会引导到设置页。若该资产来自会话，资料库会复用首页相同的投递身份，重复推送不会创建第二份知识库文档。“移到回收站”需要确认，完成后会清除会话中的失效资产路径，但保留会话文字和来源摘要。
+支持按文件名或正文搜索、预览、下载和推送。选择资产后，操作栏的“推送”按钮可选择“公开”“内部”或“机密”并发送到 CustomerService（接口值分别为 `public`、`internal`、`confidential`）；未启用联动时会显示配置提示。若该资产来自会话，资料库会复用首页相同的投递身份，重复推送不会创建第二份知识库文档。“移到回收站”需要确认，完成后会清除会话中的失效资产路径，但保留会话文字和来源摘要。
 
 报告集合发生变化时，选择器会同步重建。删除当前报告后，如果还有其他报告，会自动切换到现存项；如果列表为空，则显示空状态，不会继续展示已删除标题。
 
@@ -172,7 +180,7 @@ deepsearch --mock web
 
 搜索快照与研究报告都必须先落盘，才能显示结果操作区。
 
-- **下载**：按当前资产格式下载。
+- **下载**：在 Markdown、Word、PDF、TXT、JSON 和 HTML 中选择一种格式即时导出；不会在资料库中生成重复文件。
 - **复制**：在只读 Markdown 代码框右上角复制。
 - **切换模式重跑**：使用原问题改走搜索或研究。
 - **推送**：把现有资产发送到 CustomerService，不重复执行搜索或研究。
@@ -183,7 +191,7 @@ deepsearch --mock web
 2. 在 DeepSearch 的 `.streamlit/secrets.toml` 配置 `DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY`；
 3. 在 CustomerService 的 `.env` 配置值完全相同的 `DEEPSEARCH_INTEGRATION_KEY`；
 4. 如目标服务还要求 Bearer 凭据，再配置 `DEEPSEARCH_CUSTOMER_SERVICE_API_KEY`；
-5. 修改 Secrets 后重启 DeepSearch，再使用 `public` 或 `internal` 文档验证。
+5. 修改 Secrets 后重启 DeepSearch，再使用“公开”或“内部”文档验证。
 
 联动未启用或缺少本地密钥时，页面会直接显示配置提示，不发送请求。正常推送先收到 CustomerService v2 的 `202 + job_id`，随后等待后台任务成为 `succeeded`；页面不会再把“已排队”误报为“已入库”。连接、密钥、接口版本、文档策略、后台任务失败和等待超时都会显示具体原因。outbox 只保存资产路径、内容哈希和非敏感元数据；重试投递前会复核哈希，防止排队期间文件被替换。
 
@@ -238,6 +246,11 @@ DEEPSEARCH_MODEL = "gpt-4o-mini"
 DEEPSEARCH_LLM_TIMEOUT = 180
 DEEPSEARCH_BRAVE_API_KEY = "your-brave-key"
 
+DEEPSEARCH_CHAT_API_KEY = "your-lightweight-model-key"
+DEEPSEARCH_CHAT_BASE_URL = "https://your-provider.example/v1"
+DEEPSEARCH_CHAT_MODEL = "your-lightweight-model"
+DEEPSEARCH_CHAT_TIMEOUT = 30
+
 DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "integration-key"
 DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "optional-api-key"
 ```
@@ -247,7 +260,7 @@ DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "optional-api-key"
 旧配置迁移规则：
 
 - 旧 `mode=mock` 映射为 `runtime_mode=mock`；其他旧值映射为 `online`。
-- `default_work_mode=auto/search/research` 只控制 Web 默认工作模式。
+- `default_work_mode=auto/search/research` 只控制 Web 默认工作模式；旧值 `chat` 会自动迁移为 `auto`。
 - 旧 `topics` 和旧任务字段会在读取时兼容为新版研究任务结构。
 
 ## 10. CLI 参考
@@ -276,6 +289,10 @@ deepsearch web [--port PORT]
 ### 研究提示缺少模型
 
 确认当前不是仅搜索配置，并设置 `DEEPSEARCH_API_KEY`。模型名称和 Base URL 仅显示默认值并不代表密钥可用；修改 Secrets 后重启 Streamlit。
+
+### 侧栏显示“本地基础回答”
+
+这表示 `DEEPSEARCH_CHAT_API_KEY`、`DEEPSEARCH_CHAT_BASE_URL` 或 `DEEPSEARCH_CHAT_MODEL` 至少缺少一项，或当前使用显式演示模式。本地时间、简单计算、问候和功能介绍仍可使用。配置后在“设置 → 研究与快速回答模型”的“快速回答模型”区域核对状态，云端应用需要修改云端 Secrets 并重启。
 
 ### 模型返回 HTTP 错误
 
@@ -325,7 +342,7 @@ Streamlit Community Cloud 可免费部署公开应用。DeepSearch 当前 GitHub
 | Main file path | `streamlit_app.py` |
 | Python version | `3.12` |
 
-仓库根目录的 `requirements.txt` 会用 `-e .[ui]` 安装 DeepSearch 及 Streamlit。代码更新推送到 `main` 后，Community Cloud 会自动重新部署。
+仓库根目录的 `requirements.txt` 直接安装正文提取、PDF 和 Streamlit 运行依赖；应用代码从仓库根目录加载。代码更新推送到 `main` 后，Community Cloud 会自动重新部署。
 
 ### 云端 Secrets
 
@@ -338,7 +355,16 @@ DEEPSEARCH_MODEL = "gpt-4o-mini"
 DEEPSEARCH_LLM_TIMEOUT = 180
 ```
 
-如果只使用普通搜索，可以暂不配置模型密钥。需要 Brave Search 时再加入 `DEEPSEARCH_BRAVE_API_KEY`；只有同时部署了可从公网访问的 CustomerService API 时，才配置联动地址和对应凭据。
+快速回答模型必须单独配置，不能复用研究 Key：
+
+```toml
+DEEPSEARCH_CHAT_API_KEY = "your-lightweight-model-key"
+DEEPSEARCH_CHAT_BASE_URL = "https://your-provider.example/v1"
+DEEPSEARCH_CHAT_MODEL = "your-lightweight-model"
+DEEPSEARCH_CHAT_TIMEOUT = 30
+```
+
+Streamlit Cloud 不会读取开发者电脑中的 `.streamlit/secrets.toml`，必须在云端应用设置重新填写。不配置任何模型仍可使用普通搜索、本地时间、简单计算和基础问候。轻量模型不等于一定免费，额度、计费和频率限制取决于部署者选择的供应商；公开应用应在供应商侧设置限额和限流。需要 Brave Search 时再加入 `DEEPSEARCH_BRAVE_API_KEY`；只有同时部署了可从公网访问的 CustomerService API 时，才配置联动地址和对应凭据。
 
 不要把真实值写入仓库中的 `.streamlit/secrets.toml.example`，也不要提交 `.streamlit/secrets.toml`、`.env` 或 `config.json`。云端 Secrets 的内容不会写入 GitHub。
 
@@ -354,7 +380,7 @@ DEEPSEARCH_LLM_TIMEOUT = 180
 
 Community Cloud 的本地文件系统不保证持久保存。`data/`、`reports/`、`.cache/`、`logs/`、页面保存的 `config.json` 和任务状态都可能在实例重启、重新部署或休眠恢复后丢失。因此：
 
-- 云端版本适合公开体验搜索与研究流程；
+- 云端版本适合公开体验智能问答、搜索与研究流程；
 - 重要报告应及时下载；
 - 需要长期保存会话、任务或报告时，应实现外部对象存储或数据库适配器；
 - `deepsearch schedule` 是本地前台轮询器，Community Cloud 休眠时不会持续执行。

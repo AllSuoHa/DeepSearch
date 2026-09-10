@@ -2,7 +2,7 @@
 
 > 当前版本：2.2.0 · Python 3.11+ · Streamlit 1.62+ · 本地优先
 
-DeepSearch 是一个面向个人使用的 AI 搜索与研究助手。它把“找入口”和“做研究”明确分开：搜索模式返回可直接访问的链接与资源卡片；研究模式执行多轮检索、正文读取、证据整理、报告生成和质量校验。会话、搜索快照、报告、任务和配置默认都保存在本机。
+DeepSearch 是一个面向个人使用的 AI 问答、搜索与研究助手。智能判断会直接处理时间、计算、翻译、常识和日常交流；搜索模式返回可直接访问的链接与资源卡片；研究模式执行多轮检索、正文读取、证据整理、报告生成和质量校验。会话、搜索快照、报告、任务和配置默认都保存在本机。
 
 ## 阅读导航
 
@@ -19,7 +19,8 @@ DeepSearch 是一个面向个人使用的 AI 搜索与研究助手。它把“�
 
 ## 核心能力
 
-- **三种工作模式**：智能判断、搜索、研究；显式选择始终优先。
+- **三种用户模式**：智能判断、搜索、研究；直接回答由智能判断自动匹配。
+- **低成本快速回答**：本地时间和计算无需网络；独立轻量模型可选，绝不占用研究模型额度。
 - **链接优先搜索**：并发查询多个来源，去重、分类并标注访问风险，不强行生成论文式报告。
 - **迭代式研究**：根据证据充分性决定停止或补搜，不固定机械执行若干轮。
 - **结论优先报告**：同一模型依次完成证据整理、初稿和独立审校，随后再过确定性质量门。
@@ -30,6 +31,7 @@ DeepSearch 是一个面向个人使用的 AI 搜索与研究助手。它把“�
 ```mermaid
 flowchart LR
     U[问题] --> R{工作模式}
+    R -->|直接回答| H[本地工具、轻量模型或固定回复]
     R -->|搜索| S[查询改写与并发检索]
     S --> C[分类、风险过滤、结果卡片]
     R -->|研究| P[规划与多轮检索]
@@ -39,6 +41,7 @@ flowchart LR
     Q --> A[报告与质量评分]
     C --> L[本地会话与资产]
     A --> L
+    H --> M[仅保存会话消息]
 ```
 
 ## 快速开始
@@ -72,7 +75,7 @@ Mock 只验证流程，会在界面和报告中明确标识，不计入真实来
 部署前确认以下文件已经推送到 GitHub：
 
 - `streamlit_app.py`：应用入口；
-- `requirements.txt`：云端安装入口，当前通过 `-e .[ui]` 安装项目及 Web 依赖；
+- `requirements.txt`：云端安装入口，直接列出正文提取、PDF 和 Streamlit 运行依赖；
 - `pyproject.toml`：Python 版本与项目依赖定义；
 - `.streamlit/config.toml`：界面主题和非敏感运行配置。
 
@@ -87,7 +90,7 @@ Mock 只验证流程，会在界面和报告中明确标识，不计入真实来
 | Main file path | `streamlit_app.py` |
 | Python | `3.12`（Community Cloud 当前默认，满足本项目 `>=3.11`） |
 
-不配置任何密钥也可以使用普通搜索；研究模式必须提供 `DEEPSEARCH_API_KEY`，并按需设置 `DEEPSEARCH_BASE_URL`、`DEEPSEARCH_MODEL` 和 `DEEPSEARCH_LLM_TIMEOUT`。Brave 与 CustomerService 凭据均为可选。
+不配置任何密钥也可以使用普通搜索、本地时间、简单计算和基础问候；研究模式必须提供 `DEEPSEARCH_API_KEY`。如需模型驱动的快速回答，再单独配置 `DEEPSEARCH_CHAT_*`。Streamlit Cloud 不读取开发者电脑里的本地 Secrets，必须在应用的 **Settings → Secrets** 中重新配置。Brave 与 CustomerService 凭据均为可选。
 
 Community Cloud 的本地文件系统不保证持久保存。会话、报告、自动任务、缓存和页面内保存的设置可能在应用重启、重新部署或休眠恢复后丢失；需要长期保存时应接入外部持久化服务。自动任务也不会在应用休眠或无人访问时持续运行。
 
@@ -97,7 +100,7 @@ Community Cloud 的本地文件系统不保证持久保存。会话、报告、�
 
 | 模式 | 适合场景 | 处理方式 | 是否需要模型 |
 |---|---|---|---|
-| 智能判断 | 不想手动选择 | 资源、链接、官网等倾向搜索；论文、比较、调研、报告等倾向研究；歧义时走搜索 | 取决于路由结果 |
+| 智能判断 | 时间、计算、翻译、常识或不确定选什么 | 本地能力和普通问答直接回复；实时网页事实及链接走搜索；明确调研和报告走研究 | 取决于路由结果 |
 | 搜索 | 找官网、文档、影视平台、网页或论文入口 | 查询补充、并发检索、去重、分类、风险过滤，输出结果卡片 | 否 |
 | 研究 | 比较、综述、方案评估、深度调研 | 多轮检索、正文读取、证据综合、三阶段写作、质量门和评分 | 在线模式需要 |
 
@@ -105,6 +108,7 @@ CLI 的 `ask` 为兼容旧版默认使用研究模式，建议显式传入模式
 
 ```powershell
 deepsearch ask "找一下怪奇物语的正规播放平台" --mode search
+deepsearch ask "你好，你能做什么" --mode auto
 deepsearch ask "找 RAG 论文并比较长上下文方案" --mode auto
 deepsearch ask "调研 Agent 架构并给出选型结论" --mode research
 ```
@@ -119,10 +123,14 @@ $env:DEEPSEARCH_API_KEY = "your-model-key"
 $env:DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"
 $env:DEEPSEARCH_MODEL = "gpt-4o-mini"
 $env:DEEPSEARCH_LLM_TIMEOUT = "180"
+$env:DEEPSEARCH_CHAT_API_KEY = "your-lightweight-model-key"
+$env:DEEPSEARCH_CHAT_BASE_URL = "https://your-provider.example/v1"
+$env:DEEPSEARCH_CHAT_MODEL = "your-lightweight-model"
+$env:DEEPSEARCH_CHAT_TIMEOUT = "30"
 deepsearch web
 ```
 
-也可以把同名键写入未被 Git 跟踪的 `.streamlit/secrets.toml`，模板见 `.streamlit/secrets.toml.example`。模型超时独立于网页抓取超时；思考模型或长报告可在“设置 → 研究模型”中适当提高，允许范围为 30–900 秒。
+也可以把同名键写入未被 Git 跟踪的 `.streamlit/secrets.toml`，模板见 `.streamlit/secrets.toml.example`。模型超时独立于网页抓取超时；思考模型或长报告可在“设置 → 研究与快速回答模型”中适当提高，允许范围为 30–900 秒。
 
 常用环境变量：
 
@@ -134,6 +142,10 @@ deepsearch web
 | `DEEPSEARCH_BASE_URL` | OpenAI 兼容接口根地址 | `https://api.openai.com/v1` |
 | `DEEPSEARCH_MODEL` | 服务端模型 ID | `gpt-4o-mini` |
 | `DEEPSEARCH_LLM_TIMEOUT` | 单次模型调用超时（秒） | `180`，最小 `10` |
+| `DEEPSEARCH_CHAT_API_KEY` | 独立快速回答模型密钥 | 可选；缺失时本地回复 |
+| `DEEPSEARCH_CHAT_BASE_URL` | 快速回答模型兼容接口根地址 | 无默认供应商 |
+| `DEEPSEARCH_CHAT_MODEL` | 快速回答模型 ID | 无默认模型 |
+| `DEEPSEARCH_CHAT_TIMEOUT` | 快速回答单次请求超时（秒） | `30` |
 | `DEEPSEARCH_CONFIG` | 自定义配置文件路径 | `./config.json` |
 | `DEEPSEARCH_CUSTOMER_SERVICE_ENABLED` | 启用知识库联动 | 默认关闭 |
 | `DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY` | 联动身份凭据 | 启用联动时必需 |
@@ -145,12 +157,13 @@ deepsearch web
 
 侧栏包含“对话、全部记录、资料库、回收站、自动任务、设置”。首页支持：
 
-1. 选择工作模式并输入问题；高级选项可设置研究强度、领域、信息类型、时间范围、地区、篇幅、读者和章节。
+1. 在“智能判断 / 搜索 / 研究”中选择模式并输入问题；时间、计算、翻译和普通问答由智能判断直接匹配，高级选项可设置研究参数。
 2. 用快捷输入预填常用问题；点击后不会立即执行，可继续编辑再发送。
-3. 查看搜索卡片或结论优先研究报告，以及折叠的证据、审校和质量信息。
-4. 下载、复制、继续追问、切换模式重跑，或把已落盘资产推送到 CustomerService。
-5. 在资料库下载或推送选中资产，也可把资产移到项目回收站；恢复时不会覆盖同名文件，永久删除需要再次确认。
-6. 使用输入栏上方的悬浮按钮平滑回到页面顶部或直接到达对话底部。
+3. 直接回答显示普通助手消息；搜索显示结果卡片；研究显示结论优先报告和折叠的证据、审校及质量信息。
+4. 每条历史搜索/研究回答都保留自己的来源链接；只有已落盘的搜索/研究资产才可下载或推送到 CustomerService。
+5. 已落盘的搜索快照和研究报告可按需下载为 Markdown、Word、PDF、TXT、JSON 或 HTML；资料库仍只保存原始资产，导出不会生成重复文件。
+6. 在资料库下载或推送选中资产，也可把资产移到项目回收站；恢复时不会覆盖同名文件，永久删除需要再次确认。
+7. 使用输入栏上方的悬浮按钮平滑回到页面顶部或直接到达对话底部。
 
 删除资料库资产后，报告选择器会根据现有文件集合立即重建，不再保留已删除项；删除会话只删除聊天 JSON，不会连带删除报告或搜索快照。
 
@@ -194,7 +207,7 @@ deepsearch delivery retry --force
 
 项目没有把所有逻辑堆在 Streamlit 页面或一个 Agent 类中，而是围绕以下目标分层：
 
-- **搜索与研究解耦**：搜索返回链接，研究生成报告，两者共享来源模型但不共享错误的输出模板。
+- **三条用例隔离**：直接回答返回短消息，搜索返回链接，研究生成报告；三者具有独立成本和资产语义。
 - **业务与技术解耦**：研究循环只依赖抽象端口，不直接依赖 DuckDuckGo、磁盘或具体模型服务。
 - **入口行为一致**：Web、CLI、Python API 和自动任务最终都调用 `DeepSearchAgent`。
 - **在线与 Mock 隔离**：Mock 只能显式启用，不作为在线失败时的隐藏降级。
@@ -216,6 +229,7 @@ flowchart TB
 
     subgraph Application[应用层]
         ROUTER[IntentClassifier<br/>模式识别]
+        CHAT[ChatService<br/>轻量回复与本地降级]
         SEARCH[SearchService<br/>链接优先搜索]
         RESEARCH[ResearchService<br/>研究反馈循环]
         PLAN[ResearchPlanner<br/>规划与充分性]
@@ -244,6 +258,7 @@ flowchart TB
     API --> BOOT
     JOB --> BOOT
     BOOT --> ROUTER
+    ROUTER --> CHAT
     ROUTER --> SEARCH
     ROUTER --> RESEARCH
     RESEARCH --> PLAN
@@ -291,7 +306,7 @@ flowchart TB
 DeepSearch/
 ├─ streamlit_app.py                      # Web 入口、页面注册、侧栏与全局状态
 ├─ app_pages/
-│  ├─ home.py                            # 统一对话、搜索/研究结果和结果操作
+│  ├─ home.py                            # 统一对话、直接回答/搜索/研究结果和操作
 │  ├─ conversations.py                   # 全部会话、搜索、分页与删除
 │  ├─ history.py                         # 搜索快照和研究报告资料库
 │  ├─ trash.py                           # 恢复与永久删除
@@ -304,6 +319,7 @@ DeepSearch/
 │  │  └─ ranking.py                      # 来源相关性、质量与域名配额
 │  ├─ application/
 │  │  ├─ intent.py                       # AUTO 模式路由
+│  │  ├─ chat_service.py                 # 快速回答、本地工具、上下文裁剪和降级
 │  │  ├─ search_service.py               # 单轮链接搜索用例
 │  │  ├─ service.py                      # 多轮研究主循环
 │  │  ├─ planner.py                      # 问题拆解、充分性和查询调整
@@ -329,7 +345,7 @@ DeepSearch/
 │  │     ├─ styles.py                    # 原生页面公共样式
 │  │     └─ scroll_controls.py           # CCv2 回顶/到底悬浮控件
 │  └─ scheduling/topics.py               # 自动任务模型、管理器和调度器
-├─ tests/                                # 69 项离线优先测试
+├─ tests/                                # 94 项离线优先测试
 ├─ docs/                                 # 用户、架构与维护文档
 ├─ config.example.json                   # 完整普通配置模板
 └─ pyproject.toml                        # 包、依赖和命令入口
@@ -352,8 +368,8 @@ AgentRequest(
 `DeepSearchAgent.run()` 的职责只有三步：
 
 1. 规范化用户请求的 `WorkMode`。
-2. `AUTO` 时交给 `IntentClassifier`，显式模式直接采用。
-3. 将请求分派给 `SearchService` 或 `ResearchService`，返回互斥的 `AgentRunResult`。
+2. `AUTO` 时交给 `IntentClassifier`，只有显式搜索和研究直接采用。
+3. 将请求分派给 `ChatService`、`SearchService` 或 `ResearchService`，返回互斥的 `AgentRunResult`。
 
 ```text
 AgentRequest
@@ -361,6 +377,7 @@ AgentRequest
      ▼
 IntentClassifier（仅 AUTO）
      │
+     ├─ CHAT     → ChatResult（无资产）
      ├─ SEARCH   → SearchResponse
      │
      └─ RESEARCH → ResearchResult
@@ -371,6 +388,12 @@ IntentClassifier（仅 AUTO）
                         ├─ scorecard
                         └─ report_path
 ```
+
+### 智能直接回答执行链路
+
+`ChatService` 接收智能判断选出的时间、计算、翻译、常识、问候和功能帮助等轻量请求。时间和计算优先使用本地确定性工具；配置完整的 `DEEPSEARCH_CHAT_*` 时，其余请求使用独立快速回答模型。未配置、超时、限流或返回异常时绝不调用搜索或研究模型。发送给模型的上下文最多保留最近 6 条短消息，并在发送前排除搜索/研究正文和常见密钥形态。
+
+直接回答只写入当前会话，不生成 `data/artifacts/` 快照、研究报告或资料库项目，因此页面不显示下载、证据详情或 CustomerService 推送。
 
 ### 搜索模式执行链路
 
@@ -466,6 +489,8 @@ Web 把阻塞研究放入有限后台线程池，页面线程按整秒更新默�
 | 对象 | 作用 | 主要生产者/消费者 |
 |---|---|---|
 | `AgentRequest` | 统一请求，包含模式、地区和研究规格 | Web/CLI → `DeepSearchAgent` |
+| `ChatTurn` | 发送给快速回答模型的有限纯文本上下文 | 展示层 → `ChatService` |
+| `ChatResult` | 短回复、模型/本地能力标记和用时 | 直接回答用例 → 展示层 |
 | `SearchPlan` | 问题类型、子问题、查询和最低轮次 | `ResearchPlanner` → `ResearchService` |
 | `SearchResult` | 尚未读取正文的搜索候选 | 搜索适配器 → 搜索/研究用例 |
 | `Source` | 带正文或摘要、抓取状态和评分的来源 | `WebFetcher` → 验证/报告器 |
@@ -475,7 +500,7 @@ Web 把阻塞研究放入有限后台线程池，页面线程按整秒更新默�
 | `ResearchScorecard` | 五维质量解释和建议 | 评分器 → Web/报告元数据 |
 | `SearchResponse` | 搜索答案、卡片、警告和快照路径 | 搜索用例 → 展示层 |
 | `ResearchResult` | 报告、来源、轨迹、指标、评分和文件路径 | 研究用例 → 展示/调度/投递 |
-| `AgentRunResult` | 搜索或研究二选一的统一外壳 | Agent → 所有入口 |
+| `AgentRunResult` | 直接回答、搜索或研究三选一的统一外壳 | Agent → 所有入口 |
 
 ### 基础设施装配
 
@@ -533,6 +558,7 @@ flowchart LR
 | 单个网页 403/521/超时 | 保留摘要和错误状态，研究继续 |
 | 所有在线搜索为空 | 明确失败，不降级 Mock |
 | 在线研究没有模型 Key | 检索前失败，避免无意义网络开销 |
+| 快速回答模型未配置、超时或额度不足 | 使用可用本地能力或明确提示；不调用搜索/研究，不生成资产 |
 | 模型 400/401/403/404 | 不重试，返回配置/权限提示 |
 | 模型限流、5xx、网络或超时 | 最多重试一次 |
 | 模型三阶段失败 | 保留失败阶段并终止，不生成伪报告 |
@@ -591,7 +617,7 @@ print(run.content)
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 ```
 
-当前收集 69 项离线优先测试，覆盖路由、搜索安全、抓取、PDF、缓存、研究循环、三阶段模型调用、模型错误、质量门、会话/快捷输入、资料库/回收站、v2 异步投递、调度和 Streamlit 页面合同。
+当前离线优先测试覆盖智能路由、本地时间与计算、快速回答安全降级、历史来源链接、搜索安全、抓取、PDF、缓存、研究循环、模型错误、质量门、资料库和 Streamlit 页面合同。
 
 ## 已知边界
 

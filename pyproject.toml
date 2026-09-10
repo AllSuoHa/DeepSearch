@@ -5,12 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "deepsearch-cli"
 version = "2.2.0"
-description = "Personal AI search and conclusion-first research assistant"
+description = "Personal AI chat, search, and conclusion-first research assistant"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "DeepSearch contributors"}]
-dependencies = ["trafilatura>=2,<3", "pypdf>=6,<7"]
+dependencies = [
+    "trafilatura>=2,<3",
+    "pypdf>=6,<7",
+    "python-docx>=1.1,<2",
+    "reportlab>=4,<5",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "streamlit>=1.62,<2"]

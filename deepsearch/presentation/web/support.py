@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock
 from typing import Callable, TypeVar
+from uuid import uuid4
 
 import streamlit as st
 
@@ -16,6 +17,8 @@ from ...bootstrap import DeepSearchAgent, apply_profile
 from ...application.search_service import search_response_markdown
 from ...domain.models import (
     AgentRunResult,
+    ChatResult,
+    ChatTurn,
     QuestionType,
     ResearchBrief,
     ResearchResult,
@@ -38,7 +41,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # 同一个 phase 的重复消息只更新说明；研究补搜后重新进入 search 则会形成
 # 新步骤。详细诊断仍写入应用日志和结构化研究轨迹。
 _PROGRESS_STAGE_LABELS = {
-    "route": "准备任务",
+    "route": "理解问题",
+    "chat": "生成直接回复",
     "plan": "制定计划",
     "search": "搜索来源",
     "fetch": "读取正文",
@@ -99,7 +103,7 @@ class RunProgressTracker:
         self._started_at = self._clock()
         self._finished_at: float | None = None
         self._steps: list[dict[str, object]] = [{
-            "stage": "准备任务",
+            "stage": "理解问题",
             "detail": initial_detail,
             "started_at": self._started_at,
             "ended_at": None,
@@ -195,6 +199,10 @@ def get_settings() -> Settings:
         base_url = str(st.secrets.get("DEEPSEARCH_BASE_URL", settings.llm.base_url))
         model = str(st.secrets.get("DEEPSEARCH_MODEL", settings.llm.model))
         llm_timeout = float(st.secrets.get("DEEPSEARCH_LLM_TIMEOUT", settings.llm.request_timeout))
+        chat_api_key = str(st.secrets.get("DEEPSEARCH_CHAT_API_KEY", settings.chat_llm.api_key))
+        chat_base_url = str(st.secrets.get("DEEPSEARCH_CHAT_BASE_URL", settings.chat_llm.base_url))
+        chat_model = str(st.secrets.get("DEEPSEARCH_CHAT_MODEL", settings.chat_llm.model))
+        chat_timeout = float(st.secrets.get("DEEPSEARCH_CHAT_TIMEOUT", settings.chat_llm.request_timeout))
         integration_key = str(st.secrets.get("DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY", ""))
         customer_service_api_key = str(st.secrets.get("DEEPSEARCH_CUSTOMER_SERVICE_API_KEY", ""))
         brave_api_key = str(st.secrets.get("DEEPSEARCH_BRAVE_API_KEY", settings.brave_api_key))
@@ -207,6 +215,13 @@ def get_settings() -> Settings:
             model=model,
             api_key=api_key,
             request_timeout=max(10.0, llm_timeout),
+        )
+    if chat_api_key:
+        settings.chat_llm = LLMSettings(
+            base_url=chat_base_url,
+            model=chat_model,
+            api_key=chat_api_key,
+            request_timeout=max(1.0, chat_timeout),
         )
     if integration_key:
         settings.customer_service.integration_key = integration_key
@@ -334,6 +349,7 @@ def init_session_state() -> None:
     )
     st.session_state.setdefault("work_mode", default_mode)
     st.session_state.setdefault("pending_question", "")
+    st.session_state.setdefault("pending_run_id", "")
     st.session_state.setdefault("current_conversation_id", "")
     # pending 由输入提交回调写入，页面开始执行时转为 running；停止按钮
     # 将其改为 stopped 并触发 rerun。状态只保存字符串，不把线程放进会话。
@@ -353,6 +369,7 @@ def reset_research() -> None:
     st.session_state.current_conversation_id = ""
     st.session_state.agent_run_state = "idle"
     st.session_state.active_run_tracker = None
+    st.session_state.pending_run_id = ""
 
 
 def conversation_store(settings: Settings | None = None) -> ConversationStore:
@@ -386,16 +403,125 @@ def load_conversation(conversation_id: str) -> bool:
         (message.get("mode") for message in reversed(st.session_state.messages) if message.get("role") == "assistant"),
         "auto",
     )
+    # 历史直接回答（旧 mode=chat）回到智能判断，避免恢复出一个已删除的
+    # 手动选项；显式搜索和研究仍按原选择恢复。
     st.session_state.work_mode = {"auto": "智能判断", "search": "搜索", "research": "研究"}.get(
         str(last_mode),
         "智能判断",
     )
     st.session_state.pop("composer-mode", None)
-    st.session_state.last_result = research_context_from_messages(st.session_state.messages)
+    latest_kind = next(
+        (
+            message.get("kind")
+            for message in reversed(st.session_state.messages)
+            if message.get("role") == "assistant"
+        ),
+        "",
+    )
+    # 只有最近结果本身是研究时才恢复追问上下文；避免从一段已结束的
+    # 旧研究跨过直接回答/搜索，避免误把新的研究请求当成旧报告追问。
+    st.session_state.last_result = (
+        research_context_from_messages(st.session_state.messages)
+        if latest_kind == "research"
+        else None
+    )
     # 搜索结果不需要恢复网页正文；保存的轻量来源元数据足以重新生成
     # 与首次运行一致的结果卡片、风险标签和链接按钮。
-    st.session_state.last_run = search_run_from_messages(st.session_state.messages)
+    st.session_state.last_run = run_from_messages(st.session_state.messages)
     return True
+
+
+def chat_history_from_messages(messages: list[dict], limit: int = 6) -> tuple[ChatTurn, ...]:
+    """提取最近少量纯文本，排除来源元数据、密钥和完整网页正文。"""
+
+    turns = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role not in {"user", "assistant"}:
+            continue
+        if role == "assistant" and message.get("kind") not in {None, "", "chat"}:
+            # 搜索快照和研究报告可能很长，也不属于快速回答上下文。
+            continue
+        content = " ".join(str(message.get("content", "")).split())[:600]
+        if content:
+            turns.append(ChatTurn(role=role, content=content))
+    return tuple(turns[-max(0, limit):])
+
+
+def run_from_messages(messages: list[dict]) -> AgentRunResult | None:
+    """恢复最后一条结构化助手回答，适用于搜索、研究和直接回答。"""
+
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "assistant":
+            return run_from_message(messages, index)
+    return None
+
+
+def run_from_message(messages: list[dict], index: int) -> AgentRunResult | None:
+    """按消息自身元数据恢复结果，确保旧回答的来源链接不会随追问消失。"""
+
+    if index < 0 or index >= len(messages):
+        return None
+    message = messages[index]
+    if message.get("role") != "assistant":
+        return None
+    history = messages[: index + 1]
+    kind = str(message.get("kind", ""))
+    if kind == "chat":
+        run = chat_run_from_messages(history)
+    elif kind == "search":
+        run = search_run_from_messages(history)
+    elif kind == "research":
+        result = research_context_from_messages(history)
+        run = (
+            AgentRunResult(WorkMode.RESEARCH, WorkMode.RESEARCH, research=result)
+            if result is not None
+            else None
+        )
+    else:
+        return None
+    if run is not None:
+        requested = str(message.get("requested_mode", "auto"))
+        try:
+            run.requested_mode = WorkMode(requested)
+        except ValueError:
+            run.requested_mode = WorkMode.AUTO
+        if run.requested_mode == WorkMode.CHAT:
+            run.requested_mode = WorkMode.AUTO
+    return run
+
+
+def stable_message_id(message: dict, index: int) -> str:
+    """为新旧消息提供稳定组件键；旧记录以位置作为只读兼容标识。"""
+
+    stored = str(message.get("message_id", ""))
+    return stored if re.fullmatch(r"[0-9a-f]{32}", stored) else f"legacy-{index}"
+
+
+def chat_run_from_messages(messages: list[dict]) -> AgentRunResult | None:
+    """从最后一条直接回复恢复轻量结果，不创建或查找任何资产文件。"""
+
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get("role") != "assistant":
+            continue
+        if message.get("kind") != "chat":
+            return None
+        question = str(message.get("question", "")).strip() or next(
+            (
+                str(item.get("content", "")).strip()
+                for item in reversed(messages[:index])
+                if item.get("role") == "user"
+            ),
+            "直接回答",
+        )
+        result = ChatResult(
+            question=question,
+            answer=str(message.get("content", "")),
+            used_fallback=bool(message.get("used_fallback", False)),
+        )
+        return AgentRunResult(WorkMode.AUTO, WorkMode.CHAT, chat=result)
+    return None
 
 
 def search_run_from_messages(messages: list[dict]) -> AgentRunResult | None:
@@ -530,7 +656,7 @@ def research_context_from_messages(messages: list[dict]) -> ResearchResult | Non
     return None
 
 
-def persist_user_message(content: str, mode: WorkMode) -> dict:
+def persist_user_message(content: str, mode: WorkMode, message_id: str = "") -> dict:
     """确保会话存在后保存用户消息和请求模式。"""
 
     store = conversation_store()
@@ -539,12 +665,17 @@ def persist_user_message(content: str, mode: WorkMode) -> dict:
     if conversation is None:
         conversation = store.create()
         st.session_state.current_conversation_id = conversation["id"]
-    message = {"role": "user", "content": content, "mode": mode.value}
+    message = {
+        "message_id": message_id if re.fullmatch(r"[0-9a-f]{32}", message_id) else uuid4().hex,
+        "role": "user",
+        "content": content,
+        "mode": mode.value,
+    }
     store.append(conversation, message)
     return conversation
 
 
-def persist_run_result(run: AgentRunResult) -> dict:
+def persist_run_result(run: AgentRunResult, message_id: str = "") -> dict:
     """保存可恢复消息和轻量来源元数据，正文仍由缓存与报告文件管理。"""
 
     settings = get_settings()
@@ -554,7 +685,18 @@ def persist_run_result(run: AgentRunResult) -> dict:
     if conversation is None:
         conversation = store.create()
         st.session_state.current_conversation_id = conversation["id"]
-    if run.search is not None:
+    if run.chat is not None:
+        # 直接回答只保存普通会话消息，不生成搜索快照、报告或资料库资产。
+        artifact = ""
+        content = run.chat.answer
+        sources = []
+        kind = "chat"
+        question = run.chat.question
+        summary = run.chat.answer
+        rounds = 0
+        stop_reason = ""
+        review_summary = []
+    elif run.search is not None:
         artifact = FileArtifactStorage(settings.conversation_dir.parent / "artifacts").save_search(run.search)
         content = search_response_markdown(run.search)
         sources = [{
@@ -591,9 +733,11 @@ def persist_run_result(run: AgentRunResult) -> dict:
         stop_reason = result.stop_reason
         review_summary = list(result.review_summary)
     message = {
+        "message_id": message_id if re.fullmatch(r"[0-9a-f]{32}", message_id) else uuid4().hex,
         "role": "assistant",
         "content": content,
         "mode": run.resolved_mode.value,
+        "requested_mode": run.requested_mode.value,
         "kind": kind,
         "artifact_path": str(artifact),
         "sources": sources,
@@ -604,6 +748,7 @@ def persist_run_result(run: AgentRunResult) -> dict:
         "review_summary": review_summary,
         "queries": list(run.search.queries) if run.search is not None else [],
         "warnings": list(run.search.warnings) if run.search is not None else [],
+        "used_fallback": bool(run.chat.used_fallback) if run.chat is not None else False,
     }
     store.append(conversation, message)
     return message

@@ -28,14 +28,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def build_parser() -> argparse.ArgumentParser:
     """声明稳定 CLI 合同；旧 topics 命令继续作为 tasks 的兼容别名。"""
 
-    parser = argparse.ArgumentParser(prog="deepsearch", description="个人 AI 搜索与研究助手")
+    parser = argparse.ArgumentParser(prog="deepsearch", description="个人 AI 问答、搜索与研究助手")
     parser.add_argument("--config", default=None, help="配置文件路径（默认 ./config.json）")
     parser.add_argument("--mock", action="store_true", help="完全离线的确定性演示模式")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask = subparsers.add_parser("ask", help="执行一次搜索或研究")
-    ask.add_argument("question", help="要搜索或研究的问题")
-    ask.add_argument("--mode", choices=["auto", "search", "research"], default="research", help="工作模式；默认 research 以兼容旧版 CLI")
+    ask = subparsers.add_parser("ask", help="执行一次智能回答、搜索或研究")
+    ask.add_argument("question", help="要回答、搜索或研究的问题")
+    ask.add_argument(
+        "--mode",
+        choices=["auto", "search", "research"],
+        default="research",
+        help="工作模式；默认 research 以兼容旧版 CLI",
+    )
     # 保留旧参数名兼容已有脚本；当前实现是在报告校验后一次性打印，不是模型 token 流。
     ask.add_argument("--no-stream", action="store_true", help="不在终端打印完整结果")
 
@@ -104,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "ask":
             run = agent.run(AgentRequest(args.question, WorkMode(args.mode)), _progress)
+            if run.chat is not None:
+                if not args.no_stream:
+                    _print_markdown(run.chat.answer)
+                return 0
             if run.search is not None:
                 content = search_response_markdown(run.search)
                 path = FileArtifactStorage(settings.conversation_dir.parent / "artifacts").save_search(run.search)

@@ -22,9 +22,10 @@ class QuestionType(str, Enum):
 
 
 class WorkMode(str, Enum):
-    """用户选择的工作模式；AUTO 只决定走搜索还是研究。"""
+    """工作模式；CHAT 是智能判断的内部直接回答结果，不是手动选项。"""
 
     AUTO = "auto"
+    CHAT = "chat"
     SEARCH = "search"
     RESEARCH = "research"
 
@@ -248,6 +249,14 @@ class ResearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """可安全发送给快速回答模型的一条精简会话消息。"""
+
+    role: str
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRequest:
     """统一运行入口的请求对象。"""
 
@@ -257,6 +266,18 @@ class AgentRequest:
     locale: str = "zh-CN"
     region: str = "CN"
     conversation_id: str = ""
+    chat_history: tuple[ChatTurn, ...] = ()
+
+
+@dataclass(slots=True)
+class ChatResult:
+    """直接回答交付；不包含来源、报告或可入库资产。"""
+
+    question: str
+    answer: str
+    used_model: bool = False
+    used_fallback: bool = False
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -274,17 +295,20 @@ class SearchResponse:
 
 @dataclass(slots=True)
 class AgentRunResult:
-    """统一入口的互斥结果：一次运行只包含搜索或研究其中一种。"""
+    """统一入口的互斥结果：一次运行只包含直接回答、搜索或研究之一。"""
 
     requested_mode: WorkMode
     resolved_mode: WorkMode
     search: SearchResponse | None = None
     research: ResearchResult | None = None
+    chat: ChatResult | None = None
 
     @property
     def content(self) -> str:
         """返回适合对话列表显示的主要文本。"""
 
+        if self.chat is not None:
+            return self.chat.answer
         if self.search is not None:
             return self.search.answer
         return self.research.report if self.research is not None else ""
@@ -293,6 +317,8 @@ class AgentRunResult:
     def artifact_path(self) -> Path | None:
         """返回本次搜索快照或研究报告的本地文件路径。"""
 
+        if self.chat is not None:
+            return None
         if self.search is not None:
             return self.search.artifact_path
         return self.research.report_path if self.research is not None else None

@@ -14,6 +14,29 @@ from ...infrastructure.customer_service import DeliveryArtifact
 from ...infrastructure.storage import ConversationStore
 
 
+DATA_CLASSIFICATION_OPTIONS = ("公开", "内部", "机密")
+_DATA_CLASSIFICATION_VALUES = {
+    "公开": "public",
+    "内部": "internal",
+    "机密": "confidential",
+}
+_DATA_CLASSIFICATION_LABELS = {
+    value: label for label, value in _DATA_CLASSIFICATION_VALUES.items()
+}
+
+
+def data_classification_value(label: str | None) -> str:
+    """把界面中文密级转换为 CustomerService 使用的稳定枚举。"""
+
+    return _DATA_CLASSIFICATION_VALUES.get(str(label or ""), "internal")
+
+
+def data_classification_label(value: str | None) -> str:
+    """把持久化密级转换为中文界面文案。"""
+
+    return _DATA_CLASSIFICATION_LABELS.get(str(value or ""), "内部")
+
+
 def conversation_delivery_external_id(conversation_id: str, kind: str, question: str) -> str:
     """返回与首页历史规则兼容的会话资产 ID。"""
 
