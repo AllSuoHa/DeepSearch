@@ -1,17 +1,17 @@
 # DeepSearch 2.2 架构说明
 
-> 当前实现基线 · 最后校准：2026-09-10
+> 当前实现基线 · 最后校准：2026-09-13
 
 ## 1. 系统定位与边界
 
-DeepSearch 是单机、单用户、本地优先的 AI 问答、搜索与研究助手。核心目标是以统一请求支持三种互斥交付：智能匹配的直接回答、链接优先的搜索结果，以及经过证据综合和质量门的研究报告。
+DeepSearch 是单机、单用户、本地优先的 AI 问答、搜索与研究助手。核心目标是以统一请求支持三种互斥交付：不联网的问答、链接优先的搜索结果，以及经过证据综合和质量门的研究报告。
 
 系统有两个正交维度：
 
 | 维度 | 取值 | 决定什么 |
 |---|---|---|
 | 运行数据模式 | `runtime_mode=online/mock` | 使用真实在线来源还是显式演示数据 |
-| 请求工作模式 | 用户可选 `AUTO/SEARCH/RESEARCH`；`CHAT` 为内部结果 | 本次返回直接回答、搜索卡片还是研究报告 |
+| 请求工作模式 | 用户可选 `CHAT/SEARCH/RESEARCH`；`AUTO` 为兼容路由值 | 本次返回问答、搜索卡片还是研究报告 |
 
 `AUTO` 不是离线/在线开关。旧 `mode=auto/mock` 只作为配置兼容入口，在加载时映射到 `runtime_mode`。
 
@@ -75,13 +75,13 @@ DeepSearchAgent.run(AgentRequest) -> AgentRunResult
 
 Streamlit 页面不在主脚本线程中直接执行阻塞研究。页面先构造完整 `AgentRequest` 和 Agent，再把纯 Python 调用提交给共享的有限 `ThreadPoolExecutor`；后台线程只能向线程安全的 `RunProgressTracker` 写入应用层 phase/message，不能访问 Session State 或调用 `st.*`。
 
-页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 的外层标题在运行中保持稳定，只更新内部占位符中的阶段、说明和用时，因此用户手动展开后不会被增量更新收起。任务结束后页面线程负责持久化、结果渲染和清除停止按钮。
+页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 的外层标题在运行中保持稳定，只更新内部占位符中的阶段、说明和用时，因此用户手动展开后不会被增量更新收起。`Future` 与 tracker 由进程级、加锁的短期注册表按随机 run ID 保存，Session State 只保留该 ID；Streamlit 页面切换终止旧页面脚本时不会取消 Future，返回首页后会接回同一任务。展示层还会比较 handle 的 `conversation_id` 与当前会话，避免活动状态串入其他历史记录。结果或错误以稳定消息 ID 幂等写回发起任务的会话，再由页面渲染并清除停止按钮。显式停止会取消 tracker/Future，并保存最小重启描述；“继续执行”会复用原用户消息从头重新运行，不伪装成模型级断点续传。该机制覆盖同一进程内的页面往返，不等同于跨进程任务队列。
 
-页面滚动是唯一需要浏览器能力的交互，隔离在 `presentation/web/scroll_controls.py` 的内联 CCv2 组件。组件挂载于耗时研究之前，以 Shadow DOM 和主题变量绘制回顶/到底按钮，从受信任候选中动态定位实际滚动节点；按钮只在主内容区滚轮活动时按可用方向短暂淡入，空闲后淡出。点击滚动由可随滚轮取消的帧动画完成，不传递业务数据、不阻止默认滚轮，也不触发应用 rerun；其余页面行为继续优先使用原生 Streamlit API。
+浏览器侧输入快捷键和页面滚动隔离在 `presentation/web/scroll_controls.py` 的内联 CCv2 组件。组件挂载于耗时研究之前，以 Shadow DOM 和主题变量绘制回顶/到底按钮，从受信任候选中动态定位实际滚动节点；按钮只在主内容区滚轮活动时按可用方向短暂淡入，空闲后淡出。点击滚动由可随滚轮取消的帧动画完成，不传递业务数据、不阻止默认滚轮，也不触发应用 rerun。组件还在捕获阶段处理首页输入框的 Enter：普通 Enter 把当时的纯文本作为 trigger 值交给 Python 的既有提交回调，Shift+Enter 与 Ctrl+Enter 保留为换行。用户文本不会插入组件的受信任 HTML、CSS 或 JavaScript；重复提交仍由页面状态机和进程级原子闸门阻止。其余页面行为继续优先使用原生 Streamlit API。
 
 ## 4. 路由、直接回答与搜索流程
 
-`IntentClassifier` 在 `AUTO` 和旧兼容值 `CHAT` 时运行。时间、计算、翻译、普通常识、问候和功能帮助进入直接回答；官网、链接、价格、天气、新闻和网页实时状态进入搜索；调研、综述、报告、方案和多来源论证进入研究。只有用户显式选择的搜索或研究会强制覆盖智能判断；没有检索或研究信号时默认直接回答。
+`IntentClassifier` 只在旧入口传入 `AUTO` 时运行；`CHAT/SEARCH/RESEARCH` 均尊重用户选择。`ChatService` 不再进行第二次意图分类，也不会返回切换模式建议；它仅执行本地确定性工具或调用问答模型。问答模型通过系统约束说明实时信息的不确定性，不能声称已联网或伪造来源。搜索/研究重跑只由展示层的显式按钮触发。
 
 ### 4.1 快速回答隔离
 
@@ -112,7 +112,7 @@ sequenceDiagram
     A-->>UI: AgentRunResult(search=...)
 ```
 
-在线通用搜索源由 `search_provider_order` 决定：Brave 仅在 Key 存在时创建，DuckDuckGo 和 Wikipedia 可免费使用。学术意图追加 OpenAlex 与 Crossref。
+在线通用搜索源由 `search_provider_order` 决定：Brave 仅在 Key 存在时创建，DuckDuckGo 和 Wikipedia 可免费使用。`search_content_type` 以确定性后缀聚焦综合、新闻、知识、公告或学术内容；选择学术或问题自身具有学术意图时追加 OpenAlex 与 Crossref。该过程不调用模型。
 
 搜索不抓取全文、不调用模型，也不进入研究质量评分。它输出 `SearchResponse`，随后由展示层保存为 `data/artifacts/` 下的 Markdown 快照。
 
@@ -171,6 +171,7 @@ URL 去掉查询串、片段和尾部斜杠后作为跨来源去重键。同一 
 `WebFetcher`：
 
 - 响应体最多读取 2 MB，单来源正文默认最多保留 20,000 字符；
+- 请求和每次重定向都只接受公开 HTTP(S) 目标，拒绝 URL 内嵌凭据、本机/私网字面地址与常见本地域名；
 - 优先用 `trafilatura` 提取主体，失败时使用标准库 HTMLParser 下限；
 - 跳过 script/style/nav/header/footer/form/aside 等模板区域；
 - 用 `pypdf` 读取公开、未加密 PDF 的前 80 页；
@@ -198,7 +199,7 @@ URL 去掉查询串、片段和尾部斜杠后作为跨来源去重键。同一 
 {base_url}/chat/completions
 ```
 
-单次请求默认超时 180 秒。408、409、429、500、502、503、504、网络和超时错误最多重试一次；400/401/403/404 等确定性配置错误直接失败。服务端错误文本会限制长度并清除可能回显的 API Key。
+单次请求默认超时 180 秒。客户端请求 SSE 流并在内存中拼接完整结果，以持续产生网络活动，降低长报告被网关按空闲连接关闭的概率；只有出现 `[DONE]` 或非空 `finish_reason` 才接受本轮文本，连接中断时不会保存半份结果。阿里云百炼模型端点通过请求级 `ProxyHandler({})` 绕过 Windows 系统代理，避免本地代理的 TLS EOF，同时不改变并发搜索和网页抓取的代理策略。百炼 DeepSeek V4 还会关闭模型内部思考并把输出限制为 8192 Token，因为应用层已经执行证据整理、初稿和独立审校，避免嵌套推理放大耗时和费用；其他 OpenAI 兼容服务不接收这些供应商特定参数。408、409、429、500、502、503、504、网络和超时错误最多重试一次；400/401/403/404 等确定性配置错误直接失败。服务端错误文本会限制长度并清除可能回显的 API Key。
 
 ### 6.3 证据与确定性校验
 
@@ -248,7 +249,7 @@ logs/deepsearch.log                 轮转日志
 
 ### 7.3 会话最小化
 
-会话通过白名单保存消息字段：文本、模式、结果类型、资产路径、轻量来源元数据、问题摘要、轮次、停止原因、审校摘要、查询、警告和投递状态。密钥、任意附加字段和完整网页正文不会进入会话文件。
+会话通过白名单保存消息字段：文本、模式、结果类型、资产路径、轻量来源元数据、问题摘要、轮次、停止原因、审校摘要、查询、警告和投递状态。密钥、任意附加字段和完整网页正文不会进入会话文件。会话文件名只能来自 32 位十六进制随机 ID；读取时要求文件名与 JSON 内嵌 ID 一致，保存时再次验证 ID，防止损坏数据把写入路径带出会话目录。
 
 从磁盘恢复研究时，只重建追问所需的最小 `ResearchResult`。由于来源正文为空，后续追问通常重新检索，避免把过时摘要误当成完整证据。
 
@@ -306,7 +307,7 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 `load_settings()` 的优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入研究模型、快速回答模型、Brave 和联动凭据。
 
-`save_settings()` 使用进程内锁、临时文件和原子替换。研究/快速回答模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。快速回答 API Key 只从 `DEEPSEARCH_CHAT_API_KEY` 或 Streamlit Secrets 读取；即使手工写进 JSON 也会被忽略。
+`save_settings()` 使用进程内锁、临时文件和原子替换。研究/快速回答模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。远端快速回答 API Key 只从 `DEEPSEARCH_CHAT_API_KEY` 或 Streamlit Secrets 读取；即使手工写进 JSON 也会被忽略。本机回环地址由配置层自动补协议占位 Key，不保存任何真实凭据。
 
 模型超时与网页超时是独立参数：
 
@@ -327,7 +328,7 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 | 新质量规则 | 扩展 `AnswerValidator` 或实现 `QualityEvaluatorPort` |
 | 新存储 | 实现 `ReportStorage` 或独立 Artifact adapter |
 | 新投递目标 | 复用 `DeliveryArtifact`，增加 publisher |
-| 可恢复后台任务 | 保留 `AgentRequest`、`RoundTrace` 和质量门，外接持久状态机 |
+| 跨进程可恢复后台任务 | 保留现有 run ID、`AgentRequest`、轨迹和质量门，外接持久状态机 |
 
 ## 13. 必须保持的不变量
 

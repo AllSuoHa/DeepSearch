@@ -1,4 +1,4 @@
-"""工作模式识别：显式搜索/研究优先，其余请求由智能判断分流。"""
+"""工作模式识别：显式模式优先，AUTO 仅保留给兼容入口。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from ..domain.models import WorkMode
 
 
 class IntentClassifier:
-    """用可解释关键词完成低成本路由；直接回答不需要用户手动选择。"""
+    """用可解释关键词完成低成本路由，并尊重用户的显式模式选择。"""
 
     search_markers = (
         "链接", "网址", "官网", "官方文档", "资源", "哪里看", "在哪里", "在哪看", "在线观看",
@@ -35,12 +35,19 @@ class IntentClassifier:
     local_time_markers = (
         "几点", "时间", "几号", "日期", "星期几", "周几", "what time", "current time",
     )
+    realtime_markers = (
+        "天气", "气温", "降雨", "空气质量", "新闻", "价格", "股价", "汇率", "比分",
+        "航班", "路况", "库存", "weather", "temperature", "news", "price", "score",
+    )
+    freshness_markers = (
+        "今天", "今日", "现在", "当前", "此刻", "实时", "最新", "最近", "today", "now", "current", "latest",
+    )
 
     def resolve(self, question: str, requested: WorkMode | str = WorkMode.AUTO) -> WorkMode:
-        """返回最终工作模式；只有搜索和研究可以被用户显式强制。"""
+        """返回最终工作模式；只有兼容值 AUTO 才执行关键词路由。"""
 
         mode = requested if isinstance(requested, WorkMode) else WorkMode(str(requested))
-        if mode in {WorkMode.SEARCH, WorkMode.RESEARCH}:
+        if mode in {WorkMode.CHAT, WorkMode.SEARCH, WorkMode.RESEARCH}:
             return mode
         lowered = question.strip().lower()
         # 强研究意图优先；只有“比较/分析”等弱信号与价格、新闻等实时
@@ -70,12 +77,26 @@ class IntentClassifier:
         """识别可由本地时钟可靠回答的时间/日期问题。"""
 
         lowered = question.strip().lower()
+        # “什么时候”通常询问事件时间；仅在整句明确询问当前时刻时视为
+        # 本地时钟请求，避免“现在什么时候发布/下雨”被短路为报时。
+        if re.fullmatch(r"(?:现在|当前|此刻)(?:是)?什么时候(?:了)?[？?]?", lowered):
+            return True
         has_time_word = cls._contains_any(lowered, cls.local_time_markers)
         has_current_word = cls._contains_any(
             lowered,
             ("现在", "当前", "此刻", "今天", "今日", "now", "current", "today"),
         )
         return has_time_word and has_current_word
+
+    @classmethod
+    def is_realtime_fact_request(cls, question: str) -> bool:
+        """识别离线模型无法可靠核实、必须依赖当前数据的事实问题。"""
+
+        lowered = question.strip().lower()
+        return cls._contains_any(lowered, cls.realtime_markers) and cls._contains_any(
+            lowered,
+            cls.freshness_markers,
+        )
 
     @classmethod
     def _contains_any(cls, text: str, markers: tuple[str, ...]) -> bool:

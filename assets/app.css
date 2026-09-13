@@ -25,6 +25,12 @@
   padding-bottom: 10rem;
 }
 
+/* st.bottom 默认在内容上方保留 1rem 内边距；输入卡片自身已有阴影和
+   边界，不需要再叠加这条空白带。保留下方安全区，避免贴住窗口底边。 */
+[data-testid="stBottomBlockContainer"] {
+  padding-top: 0 !important;
+}
+
 [data-testid="stSidebar"] button {
   text-align: left;
 }
@@ -124,67 +130,215 @@ h2, h3 {
 }
 
 .st-key-composer-shell {
-  width: min(100%, 880px);
+  width: min(100%, 900px);
   margin-inline: auto;
-  padding: .4rem .48rem .45rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* CCv2 控件自身是固定定位，但 Streamlit 的元素容器仍会参与主页面的
+   block gap 计算。让挂载点退出文档流，避免输入卡片上方出现空白条。 */
+.st-key-home-scroll-controls {
+  position: absolute !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+
+.st-key-composer-input-card {
+  position: relative;
+  padding: .45rem .72rem .52rem;
   border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
-  border-radius: 24px;
-  background: color-mix(in srgb, var(--background-color, #fff) 96%, currentColor 4%);
-  box-shadow: 0 10px 34px rgba(15, 23, 42, .09), 0 1px 3px rgba(15, 23, 42, .05);
-  backdrop-filter: blur(18px);
+  border-radius: 21px;
+  background: var(--background-color, #fff);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, .08), 0 1px 3px rgba(15, 23, 42, .05);
+  transition: border-color .16s ease, box-shadow .16s ease;
 }
 
-/* 去掉 chat_input 自己的卡片边界，让输入和下方工具栏成为一个整体。 */
-.st-key-composer-shell [data-testid="stChatInput"] {
-  min-height: 54px;
-  border: 0;
-  border-radius: 18px;
+.st-key-composer-input-card:focus-within {
+  border-color: color-mix(in srgb, currentColor 22%, transparent);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .1), 0 1px 3px rgba(15, 23, 42, .05);
+}
+
+.st-key-composer-input-card [data-testid="stTextArea"] {
+  margin: 0;
+}
+
+.st-key-composer-input-card [data-testid="stTextAreaRootElement"] {
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.st-key-composer-input-card [data-baseweb="textarea"],
+.st-key-composer-input-card [data-baseweb="textarea"]:focus-within {
+  border: 0 !important;
+  outline: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Streamlit 会为文本框和数字输入框附加英文的“Press Enter…”说明。
+   项目界面已有中文标签和保存/发送按钮，因此统一隐藏这段重复提示。 */
+[data-testid="InputInstructions"] {
+  display: none !important;
+}
+
+.st-key-composer-input-card [data-testid="stTextArea"] textarea {
+  min-height: 64px;
+  padding: .55rem .28rem .25rem;
   background: transparent;
-  box-shadow: none;
+  font-size: .98rem;
+  line-height: 1.55;
+  resize: none;
 }
 
-.st-key-composer-shell [data-testid="stChatInput"] > div {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+.st-key-composer-actions {
+  min-height: 2.45rem;
+  padding: .05rem .08rem 0;
 }
 
-.st-key-composer-shell [data-testid="stChatInput"] textarea {
-  min-height: 44px;
-  padding-top: .78rem;
-  padding-bottom: .55rem;
-  font-size: .96rem;
-  line-height: 1.5;
+.st-key-composer-tools,
+.st-key-composer-submit-controls {
+  flex: 1 1 0;
 }
 
-.st-key-composer-shell [data-testid="stChatInput"] button {
-  margin-right: .25rem;
+.st-key-composer-mode-pill {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  padding: .16rem;
   border-radius: 999px;
+  background: color-mix(in srgb, var(--background-color, #fff) 86%, currentColor 14%);
 }
 
-.st-key-composer-toolbar {
-  padding: .05rem .35rem .1rem;
-  gap: .45rem;
+.st-key-composer-mode-pill [data-testid="stSegmentedControl"] {
+  opacity: .9;
 }
 
-.st-key-composer-toolbar [data-testid="stSegmentedControl"] {
-  opacity: .88;
+.st-key-composer-mode-pill [role="radiogroup"] {
+  gap: .05rem;
 }
 
-.st-key-composer-stop-generation {
-  margin-left: auto;
+.st-key-composer-mode-pill [role="radio"] {
+  min-height: 2.05rem;
+  padding: .25rem .72rem;
+  border-color: transparent !important;
+  border-radius: 999px;
+  background: transparent;
 }
 
-.st-key-composer-stop-generation button {
-  border-color: rgba(185, 28, 28, .18);
-  background: rgba(254, 226, 226, .68);
-  color: #b91c1c;
+.st-key-composer-mode-pill [role="radio"][aria-checked="true"] {
+  background: var(--background-color, #fff);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, .1);
 }
 
-.st-key-composer-stop-generation button:hover {
-  border-color: rgba(185, 28, 28, .28);
-  background: rgba(254, 202, 202, .72);
-  color: #991b1b;
+.st-key-composer-tools button,
+.st-key-composer-model-settings a {
+  min-height: 2.35rem;
+  padding-inline: .48rem;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  white-space: nowrap;
+}
+
+.st-key-composer-tools button:hover,
+.st-key-composer-model-settings a:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent) !important;
+}
+
+[class*="st-key-error-actions-"] button,
+[class*="st-key-error-actions-"] a {
+  min-height: 2.35rem;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.st-key-composer-action-send,
+.st-key-composer-action-running,
+.st-key-composer-action-resume {
+  flex: 0 0 2.55rem !important;
+  width: 2.55rem !important;
+}
+
+.st-key-composer-action-send button,
+.st-key-composer-action-running button,
+.st-key-composer-action-resume button {
+  width: 2.55rem !important;
+  min-width: 2.55rem !important;
+  height: 2.55rem;
+  min-height: 2.55rem;
+  padding: 0 !important;
+  border-radius: 999px;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0;
+  line-height: 1 !important;
+}
+
+.st-key-composer-action-send button > div,
+.st-key-composer-action-running button > div,
+.st-key-composer-action-resume button > div {
+  display: flex !important;
+  width: 100%;
+  height: 100%;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.st-key-composer-action-send button span[data-has-shortcut],
+.st-key-composer-action-running button span[data-has-shortcut],
+.st-key-composer-action-resume button span[data-has-shortcut] {
+  width: 100%;
+  height: 100%;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0 !important;
+}
+
+.st-key-composer-action-send button p,
+.st-key-composer-action-running button p,
+.st-key-composer-action-resume button p {
+  width: 0;
+  height: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 0;
+}
+
+.st-key-composer-action-send button [data-testid="stIconMaterial"],
+.st-key-composer-action-running button [data-testid="stIconMaterial"],
+.st-key-composer-action-resume button [data-testid="stIconMaterial"] {
+  display: flex !important;
+  width: 1.25rem;
+  height: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  margin: 0 !important;
+  font-size: 1.22rem !important;
+  line-height: 1 !important;
+  transform: none !important;
+}
+
+.st-key-composer-action-running button {
+  border-color: color-mix(in srgb, currentColor 16%, transparent);
+  background: color-mix(in srgb, var(--background-color, #fff) 86%, currentColor 14%);
+  color: var(--text-color, currentColor);
+}
+
+.st-key-composer-action-running button:hover {
+  border-color: color-mix(in srgb, currentColor 24%, transparent);
+  background: color-mix(in srgb, var(--background-color, #fff) 78%, currentColor 22%);
+  color: var(--text-color, currentColor);
 }
 
 .st-key-conversation-thread {
@@ -332,6 +486,24 @@ h2, h3 {
   border-radius: 14px;
 }
 
+[class*="st-key-evidence-"] [data-testid="stExpander"] summary,
+[class*="st-key-evidence-"] [data-testid="stExpander"] > div:first-child,
+[class*="st-key-evidence-"] [data-testid="stExpander"] [role="button"] {
+  display: flex;
+  align-items: center;
+  min-height: 3rem;
+  padding-block: 0 !important;
+  line-height: 1.2;
+}
+
+[class*="st-key-evidence-"] [data-testid="stExpander"] summary > div,
+[class*="st-key-evidence-"] [data-testid="stExpander"] summary p,
+[class*="st-key-evidence-"] [data-testid="stExpander"] summary span {
+  margin-block: 0 !important;
+  line-height: 1.2 !important;
+  align-self: center;
+}
+
 [class*="st-key-evidence-"] [data-testid="stExpanderDetails"] {
   padding-top: .8rem;
 }
@@ -376,12 +548,6 @@ h2, h3 {
   padding-top: .32rem;
   padding-bottom: .32rem;
   white-space: nowrap;
-}
-
-/* 修改名称保留 120 字符校验，但不显示 Streamlit 自动生成的
-   “回车提交 / 当前字数”说明，避免它挤占推送弹层的紧凑布局。 */
-[class*="st-key-history-rename-title-"] [data-testid="InputInstructions"] {
-  display: none;
 }
 
 /* 分类面板采用紧凑表格节奏，不再把每个报告渲染成一张大卡片。 */
@@ -491,16 +657,20 @@ h2, h3 {
 
   .st-key-composer-shell {
     width: 100%;
-    padding: .3rem .35rem .35rem;
-    border-radius: 20px;
+    padding: 0;
   }
 
-  .st-key-composer-shell [data-testid="stChatInput"] {
-    min-height: 52px;
+  .st-key-composer-input-card {
+    padding: .35rem .48rem .42rem;
+    border-radius: 18px;
   }
 
-  .st-key-composer-toolbar {
-    padding-inline: .2rem;
+  .st-key-composer-input-card [data-testid="stTextArea"] textarea {
+    min-height: 60px;
+  }
+
+  .st-key-composer-actions {
+    padding-inline: 0;
   }
 
   [class*="st-key-history-report-group-"] [data-testid="stExpanderDetails"] {

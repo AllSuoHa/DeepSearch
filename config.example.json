@@ -1,7 +1,9 @@
 {
   "mode": "auto",
   "runtime_mode": "online",
-  "default_work_mode": "auto",
+  "default_work_mode": "chat",
+  "search_content_type": "综合",
+  "custom_information_types": [],
   "search_provider": "duckduckgo",
   "search_provider_order": ["brave", "duckduckgo", "wikipedia"],
   "max_rounds": 3,

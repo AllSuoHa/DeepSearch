@@ -33,13 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mock", action="store_true", help="完全离线的确定性演示模式")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask = subparsers.add_parser("ask", help="执行一次智能回答、搜索或研究")
+    ask = subparsers.add_parser("ask", help="执行一次问答、搜索或研究")
     ask.add_argument("question", help="要回答、搜索或研究的问题")
     ask.add_argument(
         "--mode",
-        choices=["auto", "search", "research"],
+        choices=["chat", "search", "research", "auto"],
         default="research",
-        help="工作模式；默认 research 以兼容旧版 CLI",
+        help="工作模式；chat/search/research 为显式模式，auto 仅用于旧版兼容",
     )
     # 保留旧参数名兼容已有脚本；当前实现是在报告校验后一次性打印，不是模型 token 流。
     ask.add_argument("--no-stream", action="store_true", help="不在终端打印完整结果")

@@ -114,21 +114,22 @@ class DeepSearchAgent:
             providers,
             [] if settings.mock_search else [OpenAlexSearch(settings.request_timeout), CrossrefSearch(settings.request_timeout)],
             mock_mode=settings.mock_search,
+            content_type=settings.search_content_type,
         )
         # 快速回答模型使用独立配置实例；未配置时由 ChatService 本地降级，
         # 绝不会复用研究模型或消耗研究模型额度。
-        chat_model = OpenAICompatibleLLM(settings.chat_llm) if settings.chat_model_available else None
+        chat_model = OpenAICompatibleLLM(settings.effective_chat_llm) if settings.chat_model_available else None
         self._chat_service = ChatService(chat_model)
         self._classifier = IntentClassifier()
 
     def run(self, request: AgentRequest, progress=None) -> AgentRunResult:
-        """统一执行直接回答、搜索或研究；显式搜索/研究优先。"""
+        """统一执行问答、搜索或研究；AUTO 仅在兼容调用中做路由。"""
 
         requested = request.mode if isinstance(request.mode, WorkMode) else WorkMode(str(request.mode))
         resolved = self._classifier.resolve(request.question, requested)
         notify = progress or (lambda phase, message: None)
         mode_name = {
-            WorkMode.CHAT: "直接回答",
+            WorkMode.CHAT: "问答",
             WorkMode.SEARCH: "搜索",
             WorkMode.RESEARCH: "研究",
         }[resolved]

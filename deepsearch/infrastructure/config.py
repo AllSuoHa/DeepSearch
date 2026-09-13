@@ -5,11 +5,46 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.parse
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..domain.models import SearchContentType
+
 _CONFIG_LOCK = threading.Lock()
+_MAX_CUSTOM_INFORMATION_TYPES = 12
+_MAX_INFORMATION_TYPE_LENGTH = 20
+
+
+def normalize_custom_information_types(values: Any) -> tuple[str, ...]:
+    """清理用户自定义信息类型，保持顺序并限制配置规模。"""
+
+    if isinstance(values, str):
+        candidates = (values,)
+    else:
+        try:
+            candidates = tuple(values or ())
+        except TypeError:
+            candidates = ()
+    built_in = {item.value.casefold() for item in SearchContentType}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        label = " ".join(str(value).split())
+        key = label.casefold()
+        if (
+            not label
+            or len(label) > _MAX_INFORMATION_TYPE_LENGTH
+            or key in built_in
+            or key in seen
+        ):
+            continue
+        normalized.append(label)
+        seen.add(key)
+        if len(normalized) >= _MAX_CUSTOM_INFORMATION_TYPES:
+            break
+    return tuple(normalized)
 
 
 @dataclass(slots=True)
@@ -47,7 +82,9 @@ class Settings:
     # ``mode`` 是 2.1 兼容别名；新代码使用 runtime_mode，避免与工作模式混淆。
     mode: str = "auto"
     runtime_mode: str = ""
-    default_work_mode: str = "auto"
+    default_work_mode: str = "chat"
+    search_content_type: str = SearchContentType.GENERAL.value
+    custom_information_types: tuple[str, ...] = ()
     search_provider: str = "duckduckgo"
     search_provider_order: tuple[str, ...] = ("brave", "duckduckgo", "wikipedia")
     brave_api_key: str = ""
@@ -77,12 +114,26 @@ class Settings:
             self.runtime_mode = "mock" if self.mode == "mock" else "online"
         if self.runtime_mode not in {"online", "mock"}:
             raise ValueError("runtime_mode 必须是 online 或 mock")
-        # 2.2 早期版本曾允许把 chat 设为默认手动模式；现在直接回答只由
-        # 智能判断触发，读取旧配置时无损迁移为 auto。
-        if self.default_work_mode == "chat":
-            self.default_work_mode = "auto"
-        if self.default_work_mode not in {"auto", "search", "research"}:
-            raise ValueError("default_work_mode 必须是 auto、search 或 research")
+        # 2.2 早期 Web 默认项是智能判断（auto）；新版改为三个显式模式，
+        # 读取旧配置时迁移到成本最低且不会联网的问答模式。
+        if self.default_work_mode == "auto":
+            self.default_work_mode = "chat"
+        if self.default_work_mode not in {"chat", "search", "research"}:
+            raise ValueError("default_work_mode 必须是 chat、search 或 research")
+        self.custom_information_types = normalize_custom_information_types(
+            self.custom_information_types
+        )
+        search_content_type = " ".join(str(self.search_content_type).split())
+        built_in_search_types = {item.value for item in SearchContentType}
+        if search_content_type not in built_in_search_types:
+            custom_with_selected = normalize_custom_information_types(
+                (*self.custom_information_types, search_content_type)
+            )
+            if search_content_type and search_content_type in custom_with_selected:
+                self.custom_information_types = custom_with_selected
+            else:
+                search_content_type = SearchContentType.GENERAL.value
+        self.search_content_type = search_content_type
         self.mode = "mock" if self.runtime_mode == "mock" else "auto"
 
     @property
@@ -104,14 +155,34 @@ class Settings:
         return self.runtime_mode == "mock" or not self.llm.api_key
 
     @property
-    def chat_model_available(self) -> bool:
-        """快速回答模型只有在独立连接参数齐全且非演示模式时才可调用。"""
+    def chat_model_is_local(self) -> bool:
+        """问答地址是否明确指向本机 OpenAI 兼容服务。"""
 
-        return self.runtime_mode != "mock" and all((
-            self.chat_llm.api_key,
-            self.chat_llm.base_url,
-            self.chat_llm.model,
-        ))
+        try:
+            hostname = (urllib.parse.urlsplit(self.chat_llm.base_url).hostname or "").lower()
+        except ValueError:
+            return False
+        return hostname in {"localhost", "127.0.0.1", "::1"}
+
+    @property
+    def chat_model_available(self) -> bool:
+        """判断独立问答连接是否完整；本机服务无需真实 API Key。"""
+
+        endpoint_ready = bool(self.chat_llm.base_url and self.chat_llm.model)
+        credentials_ready = bool(self.chat_llm.api_key) or self.chat_model_is_local
+        # “演示/在线”控制搜索数据源。本机 Ollama 不联网，因此即使搜索处于
+        # 演示模式也可以用于问答；远端问答模型仍只在在线模式调用。
+        runtime_ready = self.runtime_mode != "mock" or self.chat_model_is_local
+        return endpoint_ready and credentials_ready and runtime_ready
+
+    @property
+    def effective_chat_llm(self) -> LLMSettings:
+        """返回可直接交给兼容客户端的问答配置。"""
+
+        if self.chat_model_is_local and not self.chat_llm.api_key:
+            # OpenAI 兼容客户端需要 Authorization 头；Ollama 会忽略其内容。
+            return replace(self.chat_llm, api_key="ollama")
+        return self.chat_llm
 
 
 def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
@@ -202,7 +273,9 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
             "DEEPSEARCH_RUNTIME_MODE",
             str(raw.get("runtime_mode", "mock" if os.getenv("DEEPSEARCH_MODE", raw.get("mode")) == "mock" else "online")),
         ),
-        default_work_mode=str(raw.get("default_work_mode", "auto")),
+        default_work_mode=str(raw.get("default_work_mode", "chat")),
+        search_content_type=str(raw.get("search_content_type", SearchContentType.GENERAL.value)),
+        custom_information_types=raw.get("custom_information_types", ()),
         search_provider=raw.get("search_provider", "duckduckgo"),
         search_provider_order=tuple(raw.get("search_provider_order", ("brave", "duckduckgo", "wikipedia"))),
         brave_api_key=os.getenv("DEEPSEARCH_BRAVE_API_KEY", ""),
@@ -238,6 +311,8 @@ def save_settings(settings: Settings) -> None:
         "mode": settings.mode,
         "runtime_mode": settings.runtime_mode,
         "default_work_mode": settings.default_work_mode,
+        "search_content_type": settings.search_content_type,
+        "custom_information_types": list(settings.custom_information_types),
         "search_provider": settings.search_provider,
         "search_provider_order": list(settings.search_provider_order),
         "max_rounds": settings.max_rounds,

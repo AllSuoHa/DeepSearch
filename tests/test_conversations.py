@@ -1,8 +1,12 @@
+import json
 import tempfile
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
-from deepsearch.domain.models import RiskLevel, SearchResponse, SearchResult
+from deepsearch.domain.models import RiskLevel, SearchResponse, SearchResult, WorkMode
+from deepsearch.infrastructure.config import Settings
 from deepsearch.infrastructure.storage import (
     ConversationStore,
     FileArtifactStorage,
@@ -11,8 +15,15 @@ from deepsearch.infrastructure.storage import (
     rename_library_artifact,
 )
 from deepsearch.presentation.web.support import (
+    BackgroundRunHandle,
+    RunProgressTracker,
+    active_background_run,
+    cancel_background_run,
     chat_history_from_messages,
     chat_run_from_messages,
+    discard_background_run,
+    persist_run_error_for_conversation,
+    register_background_run,
     research_context_from_messages,
     run_from_message,
     run_from_messages,
@@ -41,6 +52,97 @@ class ConversationTests(unittest.TestCase):
             self.assertNotIn("never", saved)
             self.assertNotIn("must not persist", saved)
             self.assertEqual(store.list()[0]["id"], conversation["id"])
+
+    def test_conversation_id_cannot_escape_storage_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConversationStore(root / "conversations")
+
+            with self.assertRaisesRegex(ValueError, "无效的会话记录 ID"):
+                store.save({"id": "../escaped", "messages": []})
+            self.assertFalse((root / "escaped.json").exists())
+
+            stored_id = "a" * 32
+            store.directory.mkdir(parents=True)
+            (store.directory / f"{stored_id}.json").write_text(
+                json.dumps({"id": "../escaped", "messages": []}),
+                encoding="utf-8",
+            )
+            self.assertIsNone(store.load(stored_id))
+
+    def test_message_id_makes_background_result_recovery_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConversationStore(Path(directory) / "conversations")
+            conversation = store.create()
+            message = {
+                "message_id": "a" * 32,
+                "role": "assistant",
+                "kind": "error",
+                "content": "temporary failure",
+            }
+
+            store.append(conversation, message)
+            store.append(conversation, message)
+
+            restored = store.load(conversation["id"])
+            self.assertEqual(len(restored["messages"]), 1)
+
+    def test_background_handle_and_failure_survive_page_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings(conversation_dir=root / "conversations")
+            store = ConversationStore(settings.conversation_dir)
+            conversation = store.create()
+            tracker = RunProgressTracker()
+            tracker.update("generate", "正在整理证据")
+            future: Future = Future()
+            run_id = "b" * 32
+            handle = BackgroundRunHandle(
+                run_id=run_id,
+                conversation_id=conversation["id"],
+                question="测试研究任务",
+                requested_mode=WorkMode.RESEARCH,
+                tracker=tracker,
+                future=future,
+            )
+
+            register_background_run(handle)
+            # 新页面脚本只凭 session 中的 run_id 即可找回同一个 Future。
+            recovered = active_background_run(run_id)
+            self.assertIs(recovered, handle)
+            snapshot = tracker.finish()
+            saved = persist_run_error_for_conversation(
+                RuntimeError("模型连接失败"),
+                snapshot,
+                settings,
+                conversation["id"],
+                handle.question,
+                handle.requested_mode,
+                run_id,
+            )
+            discard_background_run(run_id)
+
+            restored = store.load(conversation["id"])
+            self.assertIsNone(active_background_run(run_id))
+            self.assertEqual(restored["messages"][-1]["kind"], "error")
+            self.assertEqual(restored["messages"][-1]["question"], "测试研究任务")
+            self.assertEqual(restored["messages"][-1]["message_id"], saved["message_id"])
+            self.assertTrue(restored["messages"][-1]["progress_steps"])
+
+    def test_cancel_accepts_handle_created_before_cancelled_field_existed(self):
+        tracker = RunProgressTracker()
+        future: Future = Future()
+        legacy_handle = SimpleNamespace(
+            run_id="d" * 32,
+            tracker=tracker,
+            future=future,
+        )
+
+        register_background_run(legacy_handle)
+        cancel_background_run(legacy_handle.run_id)
+
+        self.assertIsNone(active_background_run(legacy_handle.run_id))
+        self.assertTrue(future.cancelled())
 
     def test_conversations_can_list_all_and_delete_without_touching_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:

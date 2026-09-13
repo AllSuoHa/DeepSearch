@@ -6,6 +6,8 @@ Streamlit 没有原生的页面滚动命令，因此这里使用 Custom Componen
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import streamlit as st
 
 
@@ -34,7 +36,8 @@ _SCROLL_CONTROLS_CSS = """
 
 .scroll-controls {
   position: fixed;
-  right: clamp(.75rem, 2vw, 1.5rem);
+  left: .75rem;
+  right: auto;
   bottom: calc(10.75rem + env(safe-area-inset-bottom, 0px));
   z-index: 1000;
   display: flex;
@@ -99,6 +102,7 @@ _SCROLL_CONTROLS_CSS = """
 
 @media (max-width: 768px) {
   .scroll-controls {
+    left: auto;
     right: .65rem;
     bottom: calc(12rem + env(safe-area-inset-bottom, 0px));
   }
@@ -112,10 +116,44 @@ _SCROLL_CONTROLS_CSS = """
 
 _SCROLL_CONTROLS_JS = """
 export default function(component) {
-  const { parentElement } = component;
+  const { parentElement, setTriggerValue } = component;
+  const controls = parentElement.querySelector('.scroll-controls');
   const topButton = parentElement.querySelector('[data-direction="top"]');
   const bottomButton = parentElement.querySelector('[data-direction="bottom"]');
-  if (!topButton || !bottomButton) return;
+  if (!controls || !topButton || !bottomButton) return;
+
+  const positionControls = () => {
+    // 桌面端放在正文栏右侧的留白中，而不是覆盖报告或底部输入框。
+    // 窄屏仍靠右，避免占用有限的正文宽度。
+    const composer = document.querySelector('.st-key-composer-input-card') ||
+      document.querySelector('.st-key-composer-shell');
+    if (composer) {
+      const composerTop = composer.getBoundingClientRect().top;
+      controls.style.bottom = `${Math.max(12, window.innerHeight - composerTop + 8)}px`;
+    } else {
+      controls.style.bottom = window.innerWidth <= 768 ? '12rem' : '10.75rem';
+    }
+    if (window.innerWidth <= 768) {
+      controls.style.left = 'auto';
+      controls.style.right = '.65rem';
+      return;
+    }
+    const content = document.querySelector('.st-key-conversation-thread') ||
+      document.querySelector('[data-testid="stMainBlockContainer"]');
+    if (!content) {
+      controls.style.left = 'auto';
+      controls.style.right = '1rem';
+      return;
+    }
+    const controlsWidth = controls.getBoundingClientRect().width || 40;
+    const contentRight = content.getBoundingClientRect().right;
+    const left = Math.max(
+      12,
+      Math.min(window.innerWidth - controlsWidth - 12, contentRight + 12),
+    );
+    controls.style.left = `${Math.round(left)}px`;
+    controls.style.right = 'auto';
+  };
 
   const isRootTarget = (target) =>
     target === document.scrollingElement ||
@@ -168,6 +206,7 @@ export default function(component) {
   let scrollAnimationFrame = 0;
 
   const updateAvailability = () => {
+    positionControls();
     const state = resolveScrollTarget();
     if (!state) return;
     const hasScrollableContent = state.maximum > 8;
@@ -265,10 +304,50 @@ export default function(component) {
     hideTimer = 0;
   };
 
+  const handleComposerKeyDown = (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLTextAreaElement)) return;
+    if (!target.closest('.st-key-composer-input-card')) return;
+    if (event.key !== 'Enter' || event.isComposing || event.repeat) return;
+    // 开发热更新可能短暂保留旧组件监听器；同一个 DOM 事件只允许一个
+    // 监听器发出提交 trigger，避免一次 Enter 创建两个后台回复。
+    if (event.__deepsearchComposerSubmitHandled) return;
+
+    // Chromium 的 textarea 不保证 Ctrl+Enter 会产生换行，因此显式插入并
+    // 派发 input 事件，让 React/Streamlit 同步草稿状态和光标位置。
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const start = target.selectionStart ?? target.value.length;
+      const end = target.selectionEnd ?? start;
+      target.setRangeText('\\n', start, end, 'end');
+      target.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertLineBreak',
+        data: '\\n',
+      }));
+      return;
+    }
+
+    // Shift+Enter 保留常见的原生换行；只有无修饰键的 Enter 才代理点击
+    // 发送按钮。运行中没有发送按钮，因而不会误触暂停或继续操作。
+    if (event.shiftKey || event.altKey || event.metaKey) return;
+    const sendButton = document.querySelector('.st-key-composer-action-send button');
+    if (!sendButton || sendButton.disabled || !target.value.trim()) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.__deepsearchComposerSubmitHandled = true;
+    // programmatic button.click() 不会被 Streamlit 视为可信的组件事件；
+    // 使用 CCv2 trigger 触发 Python 回调，复用与可见发送按钮相同的提交路径。
+    const submissionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTriggerValue('submit', { id: submissionId, text: target.value });
+  };
+
   // 捕获阶段的 document scroll 能覆盖根节点和任意候选容器；观察尺寸与
   // DOM 变化则让报告生成、折叠区展开等内容变化后也能及时重算按钮状态。
   document.addEventListener('wheel', handleWheel, { capture: true, passive: true });
   document.addEventListener('scroll', scheduleUpdate, { capture: true, passive: true });
+  document.addEventListener('keydown', handleComposerKeyDown, true);
   window.addEventListener('resize', scheduleUpdate, { passive: true });
   topButton.addEventListener('mouseenter', keepVisible);
   bottomButton.addEventListener('mouseenter', keepVisible);
@@ -289,6 +368,7 @@ export default function(component) {
     bottomButton.onclick = null;
     document.removeEventListener('wheel', handleWheel, { capture: true });
     document.removeEventListener('scroll', scheduleUpdate, { capture: true });
+    document.removeEventListener('keydown', handleComposerKeyDown, true);
     window.removeEventListener('resize', scheduleUpdate);
     topButton.removeEventListener('mouseenter', keepVisible);
     bottomButton.removeEventListener('mouseenter', keepVisible);
@@ -323,14 +403,31 @@ def _register_scroll_controls():
 _SCROLL_CONTROLS = _register_scroll_controls()
 
 
-def render_scroll_controls() -> None:
-    """挂载避开底部输入框的回顶/到底按钮，不触发 Python rerun。"""
+def render_scroll_controls(on_submit: Callable[[object], None] | None = None) -> None:
+    """挂载滚动按钮和输入快捷键；仅 Enter 提交时触发 Python rerun。"""
 
     global _SCROLL_CONTROLS
+    def submit_from_component() -> None:
+        result = st.session_state.get("home-scroll-controls")
+        payload = getattr(result, "submit", "")
+        if on_submit is not None:
+            on_submit(payload)
+
+    callback = {"on_submit_change": submit_from_component} if on_submit is not None else {}
     try:
-        _SCROLL_CONTROLS(key="home-scroll-controls", width="stretch", height=1)
+        _SCROLL_CONTROLS(
+            key="home-scroll-controls",
+            width="stretch",
+            height=1,
+            **callback,
+        )
     except ValueError as exc:
         if "is not registered" not in str(exc):
             raise
         _SCROLL_CONTROLS = _register_scroll_controls()
-        _SCROLL_CONTROLS(key="home-scroll-controls", width="stretch", height=1)
+        _SCROLL_CONTROLS(
+            key="home-scroll-controls",
+            width="stretch",
+            height=1,
+            **callback,
+        )

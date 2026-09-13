@@ -22,12 +22,26 @@ class QuestionType(str, Enum):
 
 
 class WorkMode(str, Enum):
-    """工作模式；CHAT 是智能判断的内部直接回答结果，不是手动选项。"""
+    """工作模式；AUTO 是旧入口的兼容路由值，Web 显式使用其余三项。"""
 
     AUTO = "auto"
     CHAT = "chat"
     SEARCH = "search"
     RESEARCH = "research"
+
+
+class SearchContentType(str, Enum):
+    """搜索内容偏好；用于查询聚焦，不改变搜索源或启用大模型。"""
+
+    GENERAL = "综合"
+    NEWS = "新闻"
+    KNOWLEDGE = "知识"
+    ANNOUNCEMENT = "公告"
+    ACADEMIC = "学术"
+
+
+# 研究高级选项中的内置信息维度。自定义项由配置层追加，展示层负责去重。
+RESEARCH_INFORMATION_TYPES = ("新闻", "知识", "公告", "研究", "数据", "政策")
 
 
 class ResourceType(str, Enum):

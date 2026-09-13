@@ -6,9 +6,13 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
 .cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+test-results/
 build/
 dist/
 .env
@@ -17,6 +21,8 @@ dist/
 config.json
 .streamlit/secrets.toml
 reports/**/*.md
+reports/**/*.txt
+reports/**/*.json
 !reports/.gitkeep
 data/
 logs/
@@ -25,3 +31,6 @@ logs/
 .vscode/
 tmp/
 temp/
+*.tmp
+.deepsearch-schedule-state.json
+.jbeval/

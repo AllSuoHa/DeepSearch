@@ -1,16 +1,16 @@
 # DeepSearch 2.2 开发与维护
 
-> 面向维护者 · 最后校准：2026-09-10
+> 面向维护者 · 最后校准：2026-09-13
 
 ## 1. 当前基线
 
 - 包版本：`2.2.0`
 - Python：`>=3.11`
 - Web：Streamlit `>=1.62,<2`
-- 运行依赖：`trafilatura>=2,<3`、`pypdf>=6,<7`
-- 默认回归：94 项离线优先测试
+- 运行依赖：`trafilatura>=2,<3`、`pypdf>=6,<7`、`python-docx>=1.1,<2`、`reportlab>=4,<5`
+- 默认回归：128 项离线优先测试，另含参数化子测试
 - 公共门面：`DeepSearchAgent.run()`；`research()`、`follow_up()` 保持兼容
-- 当前主线：个人对话工作台 + 智能直接回答 + 独立搜索 + 证据型研究 + 本地资产管理
+- 当前主线：个人对话工作台 + 显式问答 + 独立搜索 + 证据型研究 + 本地资产管理
 
 原始需求中“搜、读、验证、写报告、追问、定时收集”的核心目标仍然有效，但早期“只有研究、CLI 为主”的产品描述已经不再代表当前实现。当前事实以根 README、用户手册和架构说明为准。
 
@@ -23,7 +23,7 @@
 - `ChatService` 返回短消息，优先执行本地时间与计算，可调用独立轻量模型；
 - `SearchService` 直接返回链接、分类和风险提示，不调用模型；
 - `ResearchService` 负责多轮检索、正文、证据、报告和质量门；
-- `IntentClassifier` 在智能判断时路由，没有检索或研究信号就直接回答；
+- `IntentClassifier` 只为旧 `AUTO` 调用保留兼容路由，Web 使用显式问答/搜索/研究；
 - `AgentRunResult` 保证一次运行只携带 `ChatResult`、`SearchResponse` 或 `ResearchResult` 中的一种。
 
 这样做不是给同一报告换模板，而是把用户意图、成本和交付结构分开。
@@ -71,13 +71,15 @@
 
 ### 2.5 进度实时更新，终稿校验后展示
 
-Web 层的 `RunProgressTracker` 是线程安全的展示状态：后台线程只执行 Agent 并写入 phase/message，不能读取 `st.session_state` 或调用任何 Streamlit API；页面线程通过 `wait_for_background_result()` 读取不可变快照，只更新 `st.status(type="compact")` 内部的占位内容。外层状态标题在运行中保持稳定，避免增量更新重置用户的展开状态。
+Web 层的 `RunProgressTracker` 是线程安全的展示状态：后台线程只执行 Agent 并写入 phase/message，不能读取 `st.session_state` 或调用任何 Streamlit API；页面线程通过 `wait_for_background_result()` 读取不可变快照，只更新 `st.status(type="compact")` 内部的占位内容。外层状态标题在运行中保持稳定，避免增量更新重置用户的展开状态。后台 `Future` 与 tracker 放在加锁的进程级注册表，Session State 只保存随机 run ID；页面切换后的新脚本轮次据此接回原任务，但必须先校验 handle 的 `conversation_id` 与当前会话一致，禁止把运行状态画在其他历史记录下。成功与失败消息都以 run ID 作为稳定消息 ID 幂等保存，避免页面恢复时重复追加。显式停止只保存问题、模式和所属会话供“继续执行”重新发起，不能声称恢复已取消 HTTP 请求的模型内部状态。
 
 折叠区标题为“思考中 · 点击查看步骤”，内容标题为“思考步骤与说明”。直接回答只经过“理解问题、生成直接回复”等少量阶段，搜索和研究按实际执行增加检索、抓取、证据、初稿、审校、验证、评分和保存。用户展开后，增量内容更新不会自动收起；每个连续阶段只保留最新说明并计算独立持续时间。
 
-首页停止按钮由显式 `st.empty` 占位符承载。任务结束时先把 `agent_run_state` 设为 idle，再清空占位符并渲染结果，避免完成结果与旧“停止生成”按钮同时出现。协作式取消通过 tracker 的线程事件传到下一阶段回调；阻塞中的 HTTP 调用仍由各自超时控制。
+首页输入区使用一个状态化主操作：`idle` 显示“发送”，`running` 显示可停止的“暂停生成”，`resumable` 显示“继续执行”。运行按钮由显式 `st.empty` 占位符承载；任务结束时清空占位符、切回 `idle` 并触发一次最终重绘，避免完成结果与旧运行按钮同时出现。错误卡片的重试先把对应消息持久标记为 `retried`，再通过回调排队，因此旧入口在提交当轮立即消失且不会复制原用户消息。协作式取消通过 tracker 的线程事件传到下一阶段回调；阻塞中的 HTTP 调用仍由各自超时控制。
 
-回顶/到底没有原生 Streamlit 命令，因此单独封装在 `presentation/web/scroll_controls.py` 的内联 Custom Components v2 组件中。组件使用 Shadow DOM 隔离样式、Streamlit 主题变量和固定 SVG 图标，只查询受信任的页面滚动容器，不接收用户或模型内容；点击只调用浏览器滚动，不向 Python 回传事件或触发 rerun。不同 Streamlit 版本的实际滚动节点并不固定，组件会从 `stAppScrollToBottomContainer`、`stMain`、应用容器和浏览器根节点中动态选择“可滚动且滚动范围最大”的节点，并用捕获阶段滚动事件、`ResizeObserver` 与 `MutationObserver` 在内容增长时重新计算。按钮默认隐藏，仅主内容区 `wheel` 活动时按方向淡入，停止约 1.4 秒后淡出，并同步 ARIA/tab 顺序。按钮点击采用可取消的 `requestAnimationFrame` 缓动；新的滚轮事件先取消缓动但不阻止浏览器默认滚动，避免底部反向滚动被原生 `behavior: smooth` 动画吞掉。禁止改回 `components.v1`、iframe 或跨实例的全局 CSS/事件选择器。
+`OpenAICompatibleLLM` 请求 Chat Completions 时启用 SSE，但展示层仍只接收拼接后的完整文本。读取必须看到 `[DONE]` 或非空 `finish_reason`；连接提前结束按瞬时传输故障处理并只重试一次，禁止把半份研究报告送入质量门或资产存储。
+
+原生 Streamlit 文本区无法同时实现当前的 Enter 发送约定与悬浮回顶/到底，因此两项浏览器交互统一封装在 `presentation/web/scroll_controls.py` 的内联 Custom Components v2 组件中。组件使用 Shadow DOM 隔离按钮样式、Streamlit 主题变量和固定 SVG 图标；普通 Enter 只把输入框当时的纯文本作为 trigger 值交给 Python 提交回调，Shift+Enter 与 Ctrl+Enter 插入换行。用户或模型内容绝不能拼接进受信任的 HTML、CSS 或 JavaScript。不同 Streamlit 版本的实际滚动节点并不固定，组件会从 `stAppScrollToBottomContainer`、`stMain`、应用容器和浏览器根节点中动态选择“可滚动且滚动范围最大”的节点，并用捕获阶段滚动事件、`ResizeObserver` 与 `MutationObserver` 在内容增长时重新计算。滚动按钮默认隐藏，仅主内容区 `wheel` 活动时按方向淡入，停止约 1.4 秒后淡出，并同步 ARIA/tab 顺序；按钮点击不回传业务数据或触发 rerun。按钮动画采用可取消的 `requestAnimationFrame`；新的滚轮事件先取消缓动但不阻止浏览器默认滚动，避免底部反向滚动被原生 `behavior: smooth` 动画吞掉。禁止改回 `components.v1`、iframe 或跨实例的全局 CSS/事件选择器。
 
 结果正文不做 token 级流式输出。研究在三阶段模型调用和确定性校验完成前可能被重写或拒绝；直接回复完整返回后再持久化。页面只实时更新任务计时与步骤，最终内容一次性渲染。
 
@@ -108,8 +110,10 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 - 配置、会话、快捷输入、缓存、调度状态和 outbox 使用临时文件替换；
 - 配置保存使用进程内锁，且强制移除所有密钥；
 - 会话消息通过字段白名单，阻止秘密和完整网页正文意外落盘；
+- 会话读取要求文件名与内嵌随机 ID 一致，保存前再次验证 ID，阻止损坏数据造成路径穿越；
 - 资料库删除先移动到项目回收站，恢复和永久删除都重复校验路径；
 - 投递重试保存路径与内容哈希，发送前重新读取并复核，不复制正文。
+- 网页正文抓取在初始请求与重定向边界都拒绝明显的本机、私网和非 HTTP(S) 目标。
 
 当前没有引入数据库，因为单用户、单进程的数据规模和查询方式仍适合文件系统。
 
@@ -157,7 +161,7 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 
 | 能力 | 主要实现 | 主要测试 |
 |---|---|---|
-| 智能判断 / 搜索 / 研究 | `application/intent.py`, `application/chat_service.py`, `bootstrap.py` | `test_chat_mode.py`, `test_search_modes.py`, `test_agent.py` |
+| 问答 / 搜索 / 研究 | `application/intent.py`, `application/chat_service.py`, `bootstrap.py` | `test_chat_mode.py`, `test_search_modes.py`, `test_agent.py` |
 | 快速回答模型隔离、本地工具与上下文脱敏 | `application/chat_service.py`, `infrastructure/config.py` | `test_chat_mode.py` |
 | 链接优先搜索、风险过滤 | `application/search_service.py` | `test_search_modes.py` |
 | 多轮研究与停止条件 | `application/planner.py`, `application/service.py` | `test_planner.py`, `test_agent.py` |
@@ -188,22 +192,22 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 |---|---:|---|
 | `test_agent.py` | 5 | 研究循环、追问、配置隔离 |
 | `test_cache_ranking.py` | 2 | 缓存、稳定排序和域名配额 |
-| `test_chat_mode.py` | 10 | 路由、本地时间与计算、模型隔离、上下文和配置安全 |
-| `test_conversations.py` | 10 | 会话、逐条来源恢复、快照、快捷输入、回收站 |
+| `test_chat_mode.py` | 18 | 显式模式、旧 AUTO 路由、本地时间与计算、模型隔离、上下文和配置安全 |
+| `test_conversations.py` | 14 | 会话、逐条来源恢复、快照、快捷输入、回收站和路径边界 |
 | `test_customer_service.py` | 11 | v2 异步状态、幂等、重试、敏感信息和 outbox |
 | `test_evaluation.py` | 2 | 质量维度和 Mock 排除 |
-| `test_fetcher.py` | 4 | HTML、PDF、并发与控制字符 |
-| `test_llm.py` | 4 | 超时、HTTP 错误、重试和配置安全 |
+| `test_fetcher.py` | 6 | HTML、PDF、并发、控制字符和公网 URL 边界 |
+| `test_llm.py` | 13 | 超时、HTTP/SSE 响应、重试、兼容解析和配置安全 |
 | `test_planner.py` | 3 | 分类、最低轮次和查询范围 |
 | `test_report_export.py` | 5 | Markdown、Word、PDF、TXT、JSON、HTML 导出与链接安全 |
-| `test_report_quality.py` | 5 | 三阶段、阶段错误和失败不落盘 |
-| `test_search_modes.py` | 5 | 路由、媒体结果、风险和在线失败 |
+| `test_report_quality.py` | 6 | 三阶段、阶段错误和失败不落盘 |
+| `test_search_modes.py` | 9 | 路由、内容聚焦、配置持久化、媒体结果、风险和在线失败 |
 | `test_storage.py` | 2 | 多格式存储与资料库安全重命名 |
-| `test_streamlit_app.py` | 15 | 页面、直接回答资产隔离、控件、状态和视觉合同 |
+| `test_streamlit_app.py` | 20 | 页面、问答资产隔离、控件、后台状态和视觉合同 |
 | `test_topics.py` | 6 | 任务迁移、周期、幂等和失败隔离 |
-| `test_verification.py` | 5 | 引用、支持度、重复和噪声 |
+| `test_verification.py` | 6 | 引用、支持度、重复、来源重建和噪声 |
 
-总计 94 项。真实网络和真实模型不进入默认回归，因为内容、频率限制和可用性不稳定。可以增加非阻断契约测试，但不能替代离线单元测试。
+总计 128 项，另有参数化子测试。真实网络和真实模型不进入默认回归，因为内容、频率限制和可用性不稳定。可以增加非阻断契约测试，但不能替代离线单元测试。
 
 ## 6. 代码注释约定
 
@@ -275,7 +279,7 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 - **V2.0**：分层架构、五维质量评分、研究预算和多页面 Streamlit。
 - **V2.1**：结论优先、`ResearchBrief`、多格式导出、证据感知追问和完整自动任务。
 - **V2.2**：对话式个人工作台、搜索/研究分流、学术源、三阶段审校、本地会话、资料库回收站和统一投递。
-- **V2.2 维护更新**：删除后选择器状态同步；逐条历史来源恢复；模型超时可配置；HTTP/超时错误可操作化；直接回答改为智能匹配，并增加本地时间与计算能力。
+- **V2.2 维护更新**：删除后选择器状态同步；逐条历史来源恢复；模型超时可配置；HTTP/超时错误可操作化；Web 改为显式问答/搜索/研究，并增加本地时间与计算能力。
 
 早期 `pro.md`、2.1 项目总结和单独需求追踪表已在 2026-09-07 合并到当前文档体系并删除。Git 历史保留它们的原始内容。
 
@@ -283,7 +287,7 @@ JavaScript 页面、登录态浏览器和 OCR 没有用隐式复杂度“假装�
 
 1. 建立 claim-evidence graph，让每条主张绑定具体证据片段、来源身份和时间。
 2. 建立可重复离线评测集，联合衡量事实、覆盖、引用、来源、时延和成本。
-3. 增加持久后台任务状态机，支持取消、重试、断点恢复和事件流。
+3. 在现有同进程页面切换恢复之上增加持久任务队列，支持服务重启后的断点恢复和事件流。
 4. 增加 BM25 + embedding + cross-encoder 的可选混合召回与重排。
 5. 增加 OCR、表格结构化和可选浏览器渲染，但仍不绕过访问控制。
 6. 建立跨报告索引与时间版本，识别结论变化并形成个人知识积累。

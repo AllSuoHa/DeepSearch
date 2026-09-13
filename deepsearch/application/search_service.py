@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlsplit
 
 from .errors import SearchUnavailableError
-from ..domain.models import ResourceType, RiskLevel, SearchResponse, SearchResult
+from ..domain.models import ResourceType, RiskLevel, SearchContentType, SearchResponse, SearchResult
 
 
 class SearchService:
@@ -31,11 +31,26 @@ class SearchService:
     }
     official_hosts = {"imdb.com", "themoviedb.org", "wikipedia.org", "douban.com"}
     community_hosts = {"reddit.com", "zhihu.com", "douban.com", "tieba.baidu.com"}
+    content_hints = {
+        SearchContentType.NEWS.value: "最新 新闻",
+        SearchContentType.KNOWLEDGE.value: "百科 资料",
+        SearchContentType.ANNOUNCEMENT.value: "官方 公告",
+        SearchContentType.ACADEMIC.value: "论文 文献",
+    }
 
-    def __init__(self, providers, academic_providers=(), mock_mode: bool = False) -> None:
+    def __init__(
+        self,
+        providers,
+        academic_providers=(),
+        mock_mode: bool = False,
+        content_type: SearchContentType | str = SearchContentType.GENERAL,
+    ) -> None:
         self.providers = list(providers)
         self.academic_providers = list(academic_providers)
         self.mock_mode = mock_mode
+        self.content_type = (
+            content_type.value if isinstance(content_type, SearchContentType) else str(content_type).strip()
+        ) or SearchContentType.GENERAL.value
 
     def search(self, query: str, limit: int = 12, locale: str = "zh-CN", region: str = "CN") -> SearchResponse:
         """改写查询、并发检索、去重分类，并返回可直接展示的结果。"""
@@ -45,17 +60,28 @@ class SearchService:
         if not normalized:
             raise ValueError("搜索内容不能为空")
         is_media = self._contains(normalized, self.media_markers)
-        is_academic = self._contains(normalized, self.academic_markers)
-        queries = [normalized]
+        is_academic = (
+            self.content_type == SearchContentType.ACADEMIC.value
+            or self._contains(normalized, self.academic_markers)
+        )
+        # 内容类型只给搜索词增加可解释的聚焦提示，不更换搜索供应商，也不
+        # 调用大模型；“综合”保持原始查询，兼容已有行为与历史结果。
+        # 自定义类型本身就是查询聚焦词，例如“专利”“财报”或“访谈”。
+        content_hint = self.content_hints.get(
+            self.content_type,
+            "" if self.content_type == SearchContentType.GENERAL.value else self.content_type,
+        )
+        scoped_query = f"{normalized} {content_hint}".strip()
+        queries = [scoped_query]
         if is_media:
-            queries.append(f'{normalized} {region} 官方 播放平台 在线观看')
+            queries.append(f'{scoped_query} {region} 官方 播放平台 在线观看')
         if re.search(r"[\u4e00-\u9fff]", normalized):
             if is_media:
-                queries.append(f"{normalized} official streaming platform where to watch")
+                queries.append(f"{scoped_query} official streaming platform where to watch")
             elif is_academic:
-                queries.append(f"{normalized} paper literature review")
+                queries.append(f"{scoped_query} paper literature review")
             elif self._contains(normalized, self.technical_markers):
-                queries.append(f"{normalized} official documentation GitHub")
+                queries.append(f"{scoped_query} official documentation GitHub")
         queries = list(dict.fromkeys(queries))
         providers = [*self.providers, *(self.academic_providers if is_academic else [])]
         for provider in providers:
@@ -66,8 +92,25 @@ class SearchService:
         items = self._clean_and_classify(raw, is_media)
         items = self._deduplicate(items)[:limit]
         if not items:
+            provider_labels = {
+                "brave": "Brave",
+                "duckduckgo": "DuckDuckGo",
+                "wikipedia": "Wikipedia",
+                "openalex": "OpenAlex",
+                "crossref": "Crossref",
+            }
+            attempted = "、".join(dict.fromkeys(
+                provider_labels.get(
+                    str(getattr(provider, "name", "")).lower(),
+                    str(getattr(provider, "name", "")),
+                )
+                for provider in providers
+                if str(getattr(provider, "name", "")).strip()
+            )) or "当前搜索源"
             raise SearchUnavailableError(
-                "没有取得真实搜索结果。请检查网络或配置 Brave Search API；在线模式不会再使用 Mock 结果代替。"
+                f"没有取得可用的真实搜索结果。已尝试 {attempted}，但本次均未返回可用内容；"
+                "常见原因是网络超时、访问限制或搜索服务临时异常。请检查网络，或配置 Brave Search API "
+                "提升稳定性；在线模式不会使用 Mock 结果代替。"
             )
         warnings = []
         if self.mock_mode:

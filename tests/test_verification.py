@@ -1,10 +1,33 @@
 import unittest
 
 from deepsearch.domain.models import SearchPlan, QuestionType, Source
-from deepsearch.application.verification import AnswerValidator
+from deepsearch.application.verification import AnswerValidator, canonicalize_source_section
 
 
 class ValidationTests(unittest.TestCase):
+    def test_source_section_is_rebuilt_as_clickable_cards_without_raw_urls(self):
+        sources = [
+            Source(
+                "Example [Guide]",
+                "https://www.example.org/research/guide",
+                "supported content",
+                source_id=1,
+                fetched=True,
+                quality_score=0.86,
+            )
+        ]
+
+        report = canonicalize_source_section(
+            "# Report\n\n## 结论\nSupported [1].\n\n"
+            "## 参考来源\n1. Example: https://www.example.org/research/guide",
+            sources,
+        )
+
+        self.assertEqual(report.count("## 参考来源"), 1)
+        self.assertIn("[Example \\[Guide\\]](<https://www.example.org/research/guide>)", report)
+        self.assertIn("`example.org` · 已读取正文 · 质量 86/100", report)
+        self.assertNotIn("Example: https://", report)
+
     def test_simple_fact_does_not_require_analysis_section(self):
         plan = SearchPlan("release date", QuestionType.FACT, ["release date"], ["release date"])
         sources = [Source("one", "https://example.org", "The release date is 2025.", source_id=1)]

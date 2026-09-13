@@ -7,7 +7,7 @@ from deepsearch.application.errors import ReportQualityError
 from deepsearch.application.evaluation import ResearchQualityEvaluator
 from deepsearch.application.planner import ResearchPlanner
 from deepsearch.application.service import ResearchService
-from deepsearch.application.verification import AnswerValidator, CrossVerifier
+from deepsearch.application.verification import AnswerValidator, CrossVerifier, canonicalize_source_section
 from deepsearch.domain.models import (
     EvidenceGroup,
     Confidence,
@@ -66,6 +66,13 @@ class FailingLLM:
 
 
 class ReportQualityTests(unittest.TestCase):
+    def test_json_parser_accepts_thinking_and_fenced_model_output(self):
+        value = '<think>internal notes</think>\n```json\n{"claims": [], "gaps": []}\n```\n完成'
+
+        parsed = MarkdownReporter._parse_json(value, "证据整理")
+
+        self.assertEqual(parsed, {"claims": [], "gaps": []})
+
     def test_model_error_keeps_stage_and_actionable_detail(self):
         reporter = MarkdownReporter(FailingLLM())
         plan = SearchPlan("q", QuestionType.RESEARCH, ["q"], ["q"], 1)
@@ -94,7 +101,7 @@ class ReportQualityTests(unittest.TestCase):
         self.assertIn("证据编辑", llm.calls[0][0])
         self.assertIn("研究作者", llm.calls[1][0])
         self.assertIn("独立终稿编辑", llm.calls[2][0])
-        self.assertEqual(report.strip(), final)
+        self.assertEqual(report, canonicalize_source_section(final, [source]))
         self.assertEqual(reporter.last_review_summary, ("初稿过短，已补全结构",))
 
     def test_reporter_deterministically_restores_missing_source_list(self):

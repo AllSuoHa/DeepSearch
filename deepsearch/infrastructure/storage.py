@@ -206,6 +206,8 @@ def rename_library_artifact(
 class ConversationStore:
     """单机 JSON 会话历史；不保存密钥或抓取到的完整网页正文。"""
 
+    _id_pattern = re.compile(r"[0-9a-f]{32}")
+
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
@@ -225,11 +227,16 @@ class ConversationStore:
         return conversation
 
     def save(self, conversation: dict) -> Path:
-        """使用临时文件原子替换会话 JSON。"""
+        """复核稳定 ID 后使用临时文件原子替换会话 JSON。"""
 
+        conversation_id = str(conversation.get("id", ""))
+        # load() 读取的 JSON 也可能被本地工具手工改坏。保存前再次验证
+        # 文件名来源，不能让数据文件中的 id 把写入路径带出会话目录。
+        if self._id_pattern.fullmatch(conversation_id) is None:
+            raise ValueError("无效的会话记录 ID")
         self.directory.mkdir(parents=True, exist_ok=True)
         conversation["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        target = self.directory / f"{conversation['id']}.json"
+        target = self.directory / f"{conversation_id}.json"
         temporary = target.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(conversation, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(target)
@@ -238,7 +245,7 @@ class ConversationStore:
     def load(self, conversation_id: str) -> dict | None:
         """校验 ID 后读取会话；损坏或不存在时返回 ``None``。"""
 
-        if not re.fullmatch(r"[0-9a-f]{32}", conversation_id or ""):
+        if self._id_pattern.fullmatch(conversation_id or "") is None:
             return None
         path = self.directory / f"{conversation_id}.json"
         if not path.is_file():
@@ -247,10 +254,12 @@ class ConversationStore:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return value if isinstance(value, dict) else None
+        if not isinstance(value, dict) or value.get("id") != conversation_id:
+            return None
+        return value
 
     def append(self, conversation: dict, message: dict) -> None:
-        """只保留白名单字段，防止密钥或网页正文意外写入历史。"""
+        """只保留白名单字段，并以消息 ID 保证恢复流程可安全重放。"""
 
         safe = {
             key: value for key, value in message.items()
@@ -258,10 +267,16 @@ class ConversationStore:
                 "message_id", "role", "content", "mode", "requested_mode", "kind",
                 "artifact_path", "sources", "delivery",
                 "question", "summary", "rounds", "stop_reason", "review_summary",
-                "queries", "warnings", "used_fallback",
+                "queries", "warnings", "used_fallback", "progress_steps", "retried",
             }
         }
-        conversation.setdefault("messages", []).append(safe)
+        messages = conversation.setdefault("messages", [])
+        message_id = str(safe.get("message_id", ""))
+        # 页面切走后返回时，已完成的后台 Future 可能被新的页面轮次再次
+        # 消费。稳定 ID 让这类恢复成为幂等操作，避免重复回答或错误卡片。
+        if message_id and any(str(item.get("message_id", "")) == message_id for item in messages):
+            return
+        messages.append(safe)
         if conversation.get("title") == "新对话" and safe.get("role") == "user":
             conversation["title"] = str(safe.get("content", "")).strip()[:36] or "新对话"
         self.save(conversation)
@@ -290,7 +305,7 @@ class ConversationStore:
     def delete(self, conversation_id: str) -> bool:
         """永久删除单个会话 JSON；不删除消息引用的报告或搜索快照。"""
 
-        if not re.fullmatch(r"[0-9a-f]{32}", conversation_id or ""):
+        if self._id_pattern.fullmatch(conversation_id or "") is None:
             raise ValueError("无效的会话记录 ID")
         path = self.directory / f"{conversation_id}.json"
         if not path.is_file():

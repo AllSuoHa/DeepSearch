@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock
 from typing import Callable, TypeVar
@@ -189,6 +189,81 @@ def background_executor() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max_workers=4, thread_name_prefix="deepsearch-web")
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundRunHandle:
+    """可跨 Streamlit 页面重跑找回的后台任务句柄。"""
+
+    run_id: str
+    conversation_id: str
+    question: str
+    requested_mode: WorkMode
+    tracker: RunProgressTracker
+    future: Future[AgentRunResult]
+    cancelled: Event = field(default_factory=Event, compare=False, repr=False)
+
+
+# Streamlit 页面切换会终止原页面脚本，但 cache_resource 线程池中的任务仍可
+# 继续。进程级注册表只保存短期句柄，session_state 仅保存 run_id，既避开
+# 序列化 Future，也允许返回对话页后接续同一任务而不是重新发起请求。
+_BACKGROUND_RUNS: dict[str, BackgroundRunHandle] = {}
+_BACKGROUND_RUNS_LOCK = Lock()
+_RECENT_SUBMISSIONS: dict[tuple[str, str, str], float] = {}
+_SUBMISSION_LOCK = Lock()
+
+
+def claim_submission(scope_id: str, question: str, mode: WorkMode, cooldown: float = 2.0) -> bool:
+    """以进程级原子闸门拒绝同一浏览器短时间内的重复提交。"""
+
+    now = time.monotonic()
+    normalized_question = " ".join(question.split())
+    key = (scope_id, mode.value, normalized_question)
+    with _SUBMISSION_LOCK:
+        expired_before = now - max(0.1, cooldown)
+        for stale_key, claimed_at in tuple(_RECENT_SUBMISSIONS.items()):
+            if claimed_at < expired_before:
+                _RECENT_SUBMISSIONS.pop(stale_key, None)
+        if key in _RECENT_SUBMISSIONS:
+            return False
+        _RECENT_SUBMISSIONS[key] = now
+        return True
+
+
+def register_background_run(handle: BackgroundRunHandle) -> None:
+    """注册后台任务，供页面切换后的新脚本轮次恢复。"""
+
+    with _BACKGROUND_RUNS_LOCK:
+        _BACKGROUND_RUNS[handle.run_id] = handle
+
+
+def active_background_run(run_id: str) -> BackgroundRunHandle | None:
+    """按不可猜测的运行 ID 读取当前进程中的任务。"""
+
+    with _BACKGROUND_RUNS_LOCK:
+        return _BACKGROUND_RUNS.get(run_id)
+
+
+def discard_background_run(run_id: str) -> None:
+    """任务结果已同步到页面后释放短期句柄。"""
+
+    with _BACKGROUND_RUNS_LOCK:
+        _BACKGROUND_RUNS.pop(run_id, None)
+
+
+def cancel_background_run(run_id: str) -> None:
+    """仅响应用户明确停止或新建对话，不把普通页面切换当作取消。"""
+
+    with _BACKGROUND_RUNS_LOCK:
+        handle = _BACKGROUND_RUNS.pop(run_id, None)
+    if handle is not None:
+        # 热更新前创建的旧句柄可能还没有 cancelled 字段。兼容它们可以
+        # 避免开发服务器保留旧 Future 时因新增字段再次触发 AttributeError。
+        cancelled = getattr(handle, "cancelled", None)
+        if isinstance(cancelled, Event):
+            cancelled.set()
+        handle.tracker.cancel()
+        handle.future.cancel()
+
+
 def get_settings() -> Settings:
     """加载普通配置，并用 Streamlit Secrets 中的模型配置做安全覆盖。"""
 
@@ -216,7 +291,7 @@ def get_settings() -> Settings:
             api_key=api_key,
             request_timeout=max(10.0, llm_timeout),
         )
-    if chat_api_key:
+    if chat_api_key or chat_base_url or chat_model:
         settings.chat_llm = LLMSettings(
             base_url=chat_base_url,
             model=chat_model,
@@ -232,10 +307,10 @@ def get_settings() -> Settings:
     return settings
 
 
-def create_agent(profile: str = "均衡") -> DeepSearchAgent:
+def create_agent(profile: str = "均衡", settings: Settings | None = None) -> DeepSearchAgent:
     """按页面选择的研究强度创建单次 Agent，不修改持久化设置。"""
 
-    return DeepSearchAgent(apply_profile(get_settings(), profile))
+    return DeepSearchAgent(apply_profile(settings or get_settings(), profile))
 
 
 def progress_stage_label(phase: str) -> str:
@@ -343,33 +418,48 @@ def init_session_state() -> None:
     st.session_state.setdefault("progress_events", [])
     st.session_state.setdefault("config_path", str(PROJECT_ROOT / "config.json"))
     st.session_state.setdefault("research_profile", "均衡")
-    default_mode = {"auto": "智能判断", "search": "搜索", "research": "研究"}.get(
+    default_mode = {"chat": "问答", "auto": "问答", "search": "搜索", "research": "研究"}.get(
         get_settings().default_work_mode,
-        "智能判断",
+        "问答",
     )
     st.session_state.setdefault("work_mode", default_mode)
+    # 热更新时浏览器会话里可能还保留已经删除的“智能判断”标签；就地迁移
+    # 避免 segmented_control 因默认值不在新选项中而报错。
+    if st.session_state.work_mode not in {"问答", "搜索", "研究"}:
+        st.session_state.work_mode = "问答"
+        st.session_state.pop("composer-mode", None)
     st.session_state.setdefault("pending_question", "")
     st.session_state.setdefault("pending_run_id", "")
+    st.session_state.setdefault("pending_resume", False)
+    # 每个浏览器标签页拥有独立作用域；进程级提交闸门据此既能原子去重，
+    # 又不会误拦截其他用户恰好提交的相同问题。
+    st.session_state.setdefault("submission_scope_id", uuid4().hex)
     st.session_state.setdefault("current_conversation_id", "")
     # pending 由输入提交回调写入，页面开始执行时转为 running；停止按钮
     # 将其改为 stopped 并触发 rerun。状态只保存字符串，不把线程放进会话。
     st.session_state.setdefault("agent_run_state", "idle")
-    # tracker 只在当前 Streamlit 会话内存活，用于停止后台计算；它不会写入
-    # 会话 JSON，也不会跨浏览器标签页共享。
-    st.session_state.setdefault("active_run_tracker", None)
+    # Future 与 tracker 留在进程级短期注册表；会话只保存稳定 ID。这样页面
+    # 切换不会取消长任务，也不会把不可序列化线程对象写入 Session State。
+    st.session_state.setdefault("active_run_id", "")
+    # 显式停止后保留最小重启信息；不保存 Future 或隐性模型状态，因为
+    # 已中断的 HTTP 生成无法从某个 token 位置可靠断点续传。
+    st.session_state.setdefault("resumable_run", {})
 
 
 def reset_research() -> None:
     """开始新对话，保留全局配置和用户选择的工作模式。"""
 
+    cancel_background_run(str(st.session_state.get("active_run_id", "")))
     st.session_state.messages = []
     st.session_state.last_result = None
     st.session_state.last_run = None
     st.session_state.progress_events = []
     st.session_state.current_conversation_id = ""
     st.session_state.agent_run_state = "idle"
-    st.session_state.active_run_tracker = None
+    st.session_state.active_run_id = ""
+    st.session_state.resumable_run = {}
     st.session_state.pending_run_id = ""
+    st.session_state.pending_resume = False
 
 
 def conversation_store(settings: Settings | None = None) -> ConversationStore:
@@ -403,11 +493,11 @@ def load_conversation(conversation_id: str) -> bool:
         (message.get("mode") for message in reversed(st.session_state.messages) if message.get("role") == "assistant"),
         "auto",
     )
-    # 历史直接回答（旧 mode=chat）回到智能判断，避免恢复出一个已删除的
-    # 手动选项；显式搜索和研究仍按原选择恢复。
-    st.session_state.work_mode = {"auto": "智能判断", "search": "搜索", "research": "研究"}.get(
+    # 历史智能判断（旧 mode=auto）和直接回答都恢复为显式问答；搜索与研究
+    # 仍按结果类型恢复，避免旧会话出现已经删除的模式标签。
+    st.session_state.work_mode = {"chat": "问答", "auto": "问答", "search": "搜索", "research": "研究"}.get(
         str(last_mode),
-        "智能判断",
+        "问答",
     )
     st.session_state.pop("composer-mode", None)
     latest_kind = next(
@@ -485,8 +575,6 @@ def run_from_message(messages: list[dict], index: int) -> AgentRunResult | None:
         try:
             run.requested_mode = WorkMode(requested)
         except ValueError:
-            run.requested_mode = WorkMode.AUTO
-        if run.requested_mode == WorkMode.CHAT:
             run.requested_mode = WorkMode.AUTO
     return run
 
@@ -675,16 +763,9 @@ def persist_user_message(content: str, mode: WorkMode, message_id: str = "") -> 
     return conversation
 
 
-def persist_run_result(run: AgentRunResult, message_id: str = "") -> dict:
-    """保存可恢复消息和轻量来源元数据，正文仍由缓存与报告文件管理。"""
+def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) -> dict:
+    """构造可恢复的安全消息；不读取 Streamlit 上下文。"""
 
-    settings = get_settings()
-    store = conversation_store(settings)
-    conversation_id = st.session_state.get("current_conversation_id", "")
-    conversation = store.load(conversation_id)
-    if conversation is None:
-        conversation = store.create()
-        st.session_state.current_conversation_id = conversation["id"]
     if run.chat is not None:
         # 直接回答只保存普通会话消息，不生成搜索快照、报告或资料库资产。
         artifact = ""
@@ -732,7 +813,7 @@ def persist_run_result(run: AgentRunResult, message_id: str = "") -> dict:
         rounds = result.rounds
         stop_reason = result.stop_reason
         review_summary = list(result.review_summary)
-    message = {
+    return {
         "message_id": message_id if re.fullmatch(r"[0-9a-f]{32}", message_id) else uuid4().hex,
         "role": "assistant",
         "content": content,
@@ -750,8 +831,95 @@ def persist_run_result(run: AgentRunResult, message_id: str = "") -> dict:
         "warnings": list(run.search.warnings) if run.search is not None else [],
         "used_fallback": bool(run.chat.used_fallback) if run.chat is not None else False,
     }
+
+
+def persist_run_result_for_conversation(
+    run: AgentRunResult,
+    settings: Settings,
+    conversation_id: str,
+    message_id: str = "",
+) -> dict:
+    """把后台结果写回原会话，不受用户当前所在页面或会话影响。"""
+
+    store = conversation_store(settings)
+    conversation = store.load(conversation_id)
+    if conversation is None:
+        raise ValueError("原对话已不存在，无法保存后台结果")
+    message = _message_from_run(run, settings, message_id)
     store.append(conversation, message)
     return message
+
+
+def persist_run_result(run: AgentRunResult, message_id: str = "") -> dict:
+    """保存当前页面运行结果；兼容非后台调用和既有测试。"""
+
+    settings = get_settings()
+    store = conversation_store(settings)
+    conversation_id = st.session_state.get("current_conversation_id", "")
+    conversation = store.load(conversation_id)
+    if conversation is None:
+        conversation = store.create()
+        conversation_id = conversation["id"]
+        st.session_state.current_conversation_id = conversation_id
+    return persist_run_result_for_conversation(run, settings, conversation_id, message_id)
+
+
+def persist_run_error_for_conversation(
+    error: Exception,
+    snapshot: RunProgressSnapshot,
+    settings: Settings,
+    conversation_id: str,
+    question: str,
+    requested_mode: WorkMode,
+    message_id: str = "",
+) -> dict:
+    """保存可恢复的失败卡片，让切换页面不会抹掉诊断与重试入口。"""
+
+    store = conversation_store(settings)
+    conversation = store.load(conversation_id)
+    if conversation is None:
+        raise ValueError("原对话已不存在，无法保存失败信息")
+    message = {
+        "message_id": message_id if re.fullmatch(r"[0-9a-f]{32}", message_id) else uuid4().hex,
+        "role": "assistant",
+        "content": str(error),
+        "mode": requested_mode.value,
+        "requested_mode": requested_mode.value,
+        "kind": "error",
+        "question": question,
+        "stop_reason": snapshot.current_stage,
+        "summary": format_elapsed(snapshot.total_seconds),
+        "progress_steps": [
+            {
+                "stage": step.stage,
+                "detail": step.detail,
+                "duration_seconds": round(step.duration_seconds, 3),
+            }
+            for step in snapshot.steps
+        ],
+    }
+    store.append(conversation, message)
+    return message
+
+
+def mark_error_retried(message_id: str) -> None:
+    """持久标记已触发重试的错误卡片，避免旧按钮重复提交同一任务。"""
+
+    if not re.fullmatch(r"[0-9a-f]{32}", message_id):
+        return
+    store = conversation_store()
+    conversation = store.load(st.session_state.get("current_conversation_id", ""))
+    if conversation is None:
+        return
+    for message in conversation.get("messages", []):
+        if message.get("message_id") == message_id and message.get("kind") == "error":
+            message["retried"] = True
+            store.save(conversation)
+            break
+    for message in st.session_state.get("messages", []):
+        if message.get("message_id") == message_id and message.get("kind") == "error":
+            message["retried"] = True
+            break
 
 
 def record_delivery(outcome_status: str) -> None:

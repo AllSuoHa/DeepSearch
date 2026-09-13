@@ -4,13 +4,62 @@ import os
 import tempfile
 import tomllib
 import unittest
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 
 @unittest.skipUnless(importlib.util.find_spec("streamlit"), "Streamlit UI extra not installed")
 class StreamlitAppTests(unittest.TestCase):
+    def test_custom_information_type_is_shared_by_settings_and_advanced_options(self):
+        from streamlit.testing.v1 import AppTest
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(
+                json.dumps({
+                    "runtime_mode": "mock",
+                    "search_content_type": "专利",
+                    "custom_information_types": ["专利"],
+                }),
+                encoding="utf-8",
+            )
+
+            home = AppTest.from_file(str(root / "streamlit_app.py"))
+            home.session_state["config_path"] = str(config)
+            home.run(timeout=20)
+            information_types = next(item for item in home.pills if item.label == "信息类型")
+
+            settings_page = AppTest.from_file(str(root / "app_pages" / "settings.py"))
+            settings_page.session_state["config_path"] = str(config)
+            settings_page.run(timeout=20)
+            search_content = next(
+                item for item in settings_page.segmented_control
+                if item.label == "默认搜索内容"
+            )
+
+        self.assertEqual(len(home.exception), 0)
+        self.assertEqual(len(settings_page.exception), 0)
+        self.assertIn("专利", information_types.options)
+        self.assertIn("专利", search_content.options)
+        self.assertEqual(search_content.value, "专利")
+
+    def test_submission_claim_is_atomic_for_duplicate_frontend_events(self):
+        from deepsearch.domain.models import WorkMode
+        from deepsearch.presentation.web.support import claim_submission
+
+        scope_id = uuid4().hex
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            accepted = list(executor.map(
+                lambda _: claim_submission(scope_id, "今天 天气怎么样", WorkMode.CHAT),
+                range(8),
+            ))
+
+        self.assertEqual(sum(accepted), 1)
+
     def test_streamlit_chrome_is_transparent_without_clipping_sidebar_controls(self):
         """隐藏工具栏视觉层，但保留透明高度容纳折叠按钮和 logo。"""
 
@@ -28,9 +77,13 @@ class StreamlitAppTests(unittest.TestCase):
 
         entrypoint = (root / "streamlit_app.py").read_text(encoding="utf-8")
         home = (root / "app_pages" / "home.py").read_text(encoding="utf-8")
+        settings_page = (root / "app_pages" / "settings.py").read_text(encoding="utf-8")
         history = (root / "app_pages" / "history.py").read_text(encoding="utf-8")
         scroll_controls = (
             root / "deepsearch" / "presentation" / "web" / "scroll_controls.py"
+        ).read_text(encoding="utf-8")
+        information_type_editor = (
+            root / "deepsearch" / "presentation" / "web" / "information_types.py"
         ).read_text(encoding="utf-8")
         styles = (root / "deepsearch" / "presentation" / "web" / "styles.py").read_text(
             encoding="utf-8"
@@ -39,7 +92,7 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn("page_icon=ASSISTANT_ICON", entrypoint)
         self.assertIn("icon_image=ASSISTANT_ICON", entrypoint)
         self.assertIn("avatar=ASSISTANT_ICON", home)
-        self.assertIn("avatar=USER_ICON", home)
+        self.assertIn('else USER_ICON', home)
         self.assertIn('ASSISTANT_ICON = ":material/travel_explore:"', styles)
         self.assertIn('USER_ICON = str(PROJECT_ROOT / "assets" / "user-avatar.svg")', styles)
         self.assertTrue((root / "assets" / "logo-mark.svg").is_file())
@@ -49,12 +102,40 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertNotIn("linearGradient", user_avatar)
         self.assertIn('st.title("今天想了解什么？", anchor=False, text_alignment="center")', home)
         self.assertIn('key="result-actions"', home)
+        self.assertIn('key="chat-rerun-actions"', home)
+        self.assertIn('"改用搜索重跑"', home)
+        self.assertIn('"改用研究重跑"', home)
+        self.assertIn('"默认搜索内容"', settings_page)
+        self.assertNotIn('st.multiselect(\n            "自定义信息类型"', settings_page)
+        self.assertIn('st.pills(\n                                "添加信息类型"', home)
+        self.assertIn('[":material/add:"]', home)
+        self.assertIn('key="information-type-controls"', home)
+        self.assertIn('key="add-information-type"', home)
+        self.assertIn('key="settings-search-content-controls"', settings_page)
+        self.assertIn('key="settings-add-information-type"', settings_page)
+        self.assertNotIn('with st.popover("添加信息类型"', home)
+        self.assertNotIn("@st.dialog", information_type_editor)
+        self.assertIn("render_information_type_editor", information_type_editor)
+        self.assertIn('horizontal=True', information_type_editor)
+        self.assertIn('label_visibility="collapsed"', information_type_editor)
+        self.assertIn('key=f"{form_key}-name"', information_type_editor)
+        self.assertNotIn('st.text_input("知识领域"', home)
+        self.assertIn("*settings.custom_information_types", home)
         self.assertIn('horizontal_alignment="right"', home)
+        self.assertNotIn('.st-key-add-information-type button', css)
         self.assertIn('[data-testid="stChatMessageAvatarCustom"]', css)
         self.assertIn('border: 0 !important;', css)
         self.assertIn('background: transparent !important;', css)
         self.assertIn('[data-testid="stIconMaterial"]', css)
         self.assertIn('font-size: 2rem !important;', css)
+        self.assertIn('.st-key-composer-input-card', css)
+        self.assertIn('.st-key-composer-mode-pill', css)
+        self.assertNotIn('.st-key-composer-mode-row', css)
+        self.assertIn('[data-testid="stTextAreaRootElement"]', css)
+        self.assertIn('.st-key-composer-action-send button', css)
+        self.assertIn('border-radius: 999px;', css)
+        self.assertIn('[data-testid="stBottomBlockContainer"]', css)
+        self.assertIn('.st-key-home-scroll-controls', css)
         self.assertIn('key=f"research-report-{message_key}"', home)
         self.assertIn('[class*="st-key-research-report-"]', css)
         self.assertIn('key=f"research-report-library-{asset_key}"', history)
@@ -71,7 +152,7 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn('columns[1].markdown(str(item["title"]))', history)
         self.assertIn('with st.popover("推送", icon=":material/send:", width=148', history)
         self.assertNotIn("history-trash-report", history)
-        self.assertIn('[class*="st-key-history-rename-title-"] [data-testid="InputInstructions"]', css)
+        self.assertIn('[data-testid="InputInstructions"]', css)
         self.assertIn('[data-testid="stHorizontalBlock"]', css)
         self.assertIn('key=f"history-report-select-{row_key}"', history)
         self.assertIn('header[0].caption("选择", text_alignment="center")', history)
@@ -89,7 +170,7 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn("render_report_group(report_kind", history)
         self.assertIn('[class*="st-key-result-card-"]', css)
         self.assertIn("st.markdown(ASSISTANT_ICON)", home)
-        self.assertIn("render_scroll_controls()", home)
+        self.assertIn("render_scroll_controls(on_submit=submit_composer)", home)
         self.assertIn("st.components.v2.component", scroll_controls)
         self.assertNotIn("components.v1", scroll_controls)
         self.assertIn('aria-label="回到顶部"', scroll_controls)
@@ -104,6 +185,38 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertNotIn("behavior: 'smooth'", scroll_controls)
         self.assertIn("new MutationObserver(scheduleUpdate)", scroll_controls)
         self.assertIn("right.maximum - left.maximum", scroll_controls)
+        self.assertIn('[data-testid="stMainBlockContainer"]', scroll_controls)
+        self.assertIn(".st-key-conversation-thread", scroll_controls)
+        self.assertIn("contentRight + 12", scroll_controls)
+        self.assertIn("window.innerHeight - composerTop + 8", scroll_controls)
+        self.assertIn("handleComposerKeyDown", scroll_controls)
+        self.assertIn("__deepsearchComposerSubmitHandled", scroll_controls)
+        self.assertIn("target.setRangeText('\\\\n'", scroll_controls)
+        self.assertIn("inputType: 'insertLineBreak'", scroll_controls)
+        self.assertIn("setTriggerValue('submit', { id: submissionId, text: target.value })", scroll_controls)
+        self.assertIn("event.stopImmediatePropagation()", scroll_controls)
+        self.assertIn("on_submit_change", scroll_controls)
+        self.assertIn('get("home-scroll-controls")', scroll_controls)
+        self.assertIn("render_scroll_controls(on_submit=submit_composer)", home)
+        self.assertIn("show_home_intro = True", home)
+        self.assertIn('str(st.session_state.get("pending_question", "")).strip()', home)
+        self.assertIn("claim_submission(", home)
+        self.assertIn('run_output_id = active_run_id or str(st.session_state.get("pending_run_id", ""))', home)
+        self.assertIn('key=f"active-run-output-{run_output_id}"', home)
+        self.assertIn("render_active_background_run(handle, stop_button_slot, active_run_output_slot)", home)
+        prompt_branch = home.split("if prompt:", 1)[1].split(
+            'elif st.session_state.agent_run_state == "running":', 1
+        )[0]
+        self.assertNotIn('st.chat_message("user"', prompt_branch)
+        self.assertIn("register_background_run(handle)", prompt_branch)
+        self.assertIn("st.rerun()", prompt_branch)
+        submission_branch = home.split("if prompt:", 1)[1].split(
+            'elif st.session_state.agent_run_state == "running":',
+            1,
+        )[0]
+        self.assertNotIn('with st.chat_message("user"', submission_branch)
+        self.assertIn("register_background_run(handle)", submission_branch)
+        self.assertIn("st.rerun()", submission_branch)
         self.assertNotIn("button.disabled", scroll_controls)
         self.assertNotIn(":disabled", scroll_controls)
 
@@ -173,9 +286,9 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(ticks, [0, 1, 2])
 
         self.assertIn('expanded=False, type="compact"', home)
-        self.assertIn('key=f"thinking-{run_id}"', home)
+        self.assertIn('key=f"thinking-{handle.run_id}"', home)
         self.assertIn("message_run = run_from_message(st.session_state.messages, index)", home)
-        progress_update = home.split("def render_progress", 1)[1].split("specification =", 1)[0]
+        progress_update = home.split("def render_progress", 1)[1].split("consumed = False", 1)[0]
         self.assertNotIn("status.update", progress_update)
         self.assertIn('type="compact"', tasks)
         self.assertIn("用时", home)
@@ -233,7 +346,8 @@ class StreamlitAppTests(unittest.TestCase):
             app = shortcut.click().run(timeout=20)
 
             self.assertEqual(len(app.exception), 0)
-            self.assertEqual(app.chat_input[0].value, expected_prompt)
+            draft = next(item for item in app.text_area if item.key == "assistant-draft")
+            self.assertEqual(draft.value, expected_prompt)
             self.assertEqual(len(app.chat_message), 0)
 
             # 模拟一次正在执行的提交。停止按钮使用显式回调，因此点击后
@@ -242,33 +356,205 @@ class StreamlitAppTests(unittest.TestCase):
             stop_app.session_state["config_path"] = str(config)
             stop_app.session_state["agent_run_state"] = "pending"
             stop_app.run(timeout=20)
-            stop_button = next(button for button in stop_app.button if button.label == "停止生成")
+            stop_button = next(button for button in stop_app.button if button.label == "暂停生成")
             stop_app = stop_button.click().run(timeout=20)
             self.assertEqual(len(stop_app.exception), 0)
             self.assertEqual(stop_app.session_state["agent_run_state"], "idle")
             self.assertEqual(len(stop_app.warning), 0)
             self.assertEqual(len(stop_app.chat_message), 0)
             self.assertTrue(any("已停止生成" in caption.value for caption in stop_app.caption))
-            self.assertFalse(any(button.label == "停止生成" for button in stop_app.button))
+            self.assertFalse(any(button.label == "暂停生成" for button in stop_app.button))
 
             # 完整任务结束后，结果、完成状态和恢复后的提交控件必须出现在
             # 同一轮页面中，不能残留“停止生成”按钮。
             completed_app = AppTest.from_file(str(root / "streamlit_app.py"))
             completed_app.session_state["config_path"] = str(config)
             completed_app.run(timeout=20)
-            completed_app = completed_app.chat_input[0].set_value("Python 是什么？").run(timeout=30)
+            draft = next(item for item in completed_app.text_area if item.key == "assistant-draft")
+            completed_app = draft.set_value("现在几点").run(timeout=20)
+            send_button = next(button for button in completed_app.button if button.label == "发送")
+            completed_app = send_button.click().run(timeout=30)
             self.assertEqual(len(completed_app.exception), 0)
-            self.assertTrue(any(status.state == "complete" for status in completed_app.status))
-            self.assertTrue(any("用时" in status.label for status in completed_app.status))
-            self.assertFalse(any(button.label == "停止生成" for button in completed_app.button))
-            self.assertTrue(any("思考步骤与说明" in item.value for item in completed_app.markdown))
+            self.assertFalse(any(button.label == "暂停生成" for button in completed_app.button))
+            self.assertTrue(any(button.label == "发送" for button in completed_app.button))
+            self.assertTrue(any("北京时间" in item.value for item in completed_app.markdown))
+            self.assertTrue(any(item.value == "今天想了解什么？" for item in completed_app.title))
 
         source = (root / "app_pages" / "home.py").read_text(encoding="utf-8")
-        self.assertIn('submit_mode="disable"', source)
-        self.assertIn("on_submit=prepare_run", source)
-        self.assertIn('"停止生成"', source)
+        self.assertIn('key="assistant-draft"', source)
+        self.assertIn('key="composer-input-card", gap=None', source)
+        self.assertIn('key="composer-mode-pill", width="content"', source)
+        self.assertNotIn('key="composer-mode-row"', source)
+        self.assertIn('with st.popover("高级选项", width=100)', source)
+        self.assertIn("on_click=submit_composer", source)
+        self.assertIn('"暂停生成"', source)
 
-    def test_smart_mode_handles_current_time_without_search_or_artifact_actions(self):
+    def test_saved_model_failure_renders_after_page_return_with_retry(self):
+        """错误重试只能消费一次，并复用持久化的原用户消息。"""
+
+        from streamlit.testing.v1 import AppTest
+        from deepsearch.infrastructure.storage import ConversationStore
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            config = temporary_root / "config.json"
+            config.write_text(
+                json.dumps({"runtime_mode": "mock", "conversation_dir": "data/conversations"}),
+                encoding="utf-8",
+            )
+            store = ConversationStore(temporary_root / "data" / "conversations")
+            conversation = store.create()
+            user_message = {
+                "message_id": "b" * 32,
+                "role": "user",
+                "content": "测试研究问题",
+                "mode": "research",
+            }
+            error_message = {
+                "message_id": "c" * 32,
+                "role": "assistant",
+                "kind": "error",
+                "mode": "research",
+                "requested_mode": "research",
+                "question": "测试研究问题",
+                "content": "模型服务在响应完成前关闭了加密连接。",
+                "stop_reason": "整理证据",
+                "summary": "2 分 24 秒",
+                "progress_steps": [{
+                    "stage": "整理证据",
+                    "detail": "正在生成证据映射",
+                    "duration_seconds": 144.0,
+                }],
+            }
+            store.append(conversation, user_message)
+            store.append(conversation, error_message)
+
+            app = AppTest.from_file(str(root / "streamlit_app.py"))
+            app.session_state["config_path"] = str(config)
+            app.session_state["current_conversation_id"] = conversation["id"]
+            app.session_state["messages"] = [user_message, error_message]
+            app.run(timeout=20)
+            self.assertEqual(len(app.exception), 0)
+            self.assertTrue(any(item.state == "error" for item in app.status))
+            self.assertTrue(any("关闭了加密连接" in item.value for item in app.error))
+            retry_button = next(button for button in app.button if button.label == "重新执行")
+            app = retry_button.click().run(timeout=30)
+            restored = store.load(conversation["id"])
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertFalse(any(button.label == "重新执行" for button in app.button))
+        self.assertTrue(any(button.label == "发送" for button in app.button))
+        self.assertFalse(any("关闭了加密连接" in item.value for item in app.error))
+        self.assertEqual(sum(message.get("role") == "user" for message in restored["messages"]), 1)
+        self.assertTrue(restored["messages"][1]["retried"])
+        self.assertEqual(restored["messages"][-1]["role"], "assistant")
+        home_source = (root / "app_pages" / "home.py").read_text(encoding="utf-8")
+        self.assertIn('label="前往模型设置"', home_source)
+
+    def test_active_run_is_not_rendered_inside_another_conversation(self):
+        """后台状态必须按对话归属渲染，其他记录只显示自己的消息。"""
+
+        from streamlit.testing.v1 import AppTest
+
+        from deepsearch.domain.models import WorkMode
+        from deepsearch.presentation.web.support import (
+            BackgroundRunHandle,
+            RunProgressTracker,
+            cancel_background_run,
+            register_background_run,
+        )
+
+        root = Path(__file__).resolve().parents[1]
+        run_id = "e" * 32
+        handle = BackgroundRunHandle(
+            run_id=run_id,
+            conversation_id="a" * 32,
+            question="原对话中的研究",
+            requested_mode=WorkMode.RESEARCH,
+            tracker=RunProgressTracker(),
+            future=Future(),
+        )
+        register_background_run(handle)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.json"
+                config.write_text(
+                    json.dumps({"runtime_mode": "mock", "conversation_dir": "data/conversations"}),
+                    encoding="utf-8",
+                )
+                app = AppTest.from_file(str(root / "streamlit_app.py"))
+                app.session_state["config_path"] = str(config)
+                app.session_state["current_conversation_id"] = "b" * 32
+                app.session_state["active_run_id"] = run_id
+                app.session_state["agent_run_state"] = "running"
+                app.session_state["messages"] = [{
+                    "message_id": "f" * 32,
+                    "role": "user",
+                    "content": "另一条对话",
+                    "mode": "auto",
+                }]
+                app.run(timeout=20)
+        finally:
+            cancel_background_run(run_id)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.chat_message), 1)
+        self.assertFalse(any("思考中" in status.label for status in app.status))
+        self.assertFalse(any(button.label == "停止生成" for button in app.button))
+        draft = next(item for item in app.text_area if item.key == "assistant-draft")
+        self.assertTrue(draft.disabled)
+
+    def test_stopped_run_can_restart_without_duplicating_user_message(self):
+        """继续执行从原问题重跑，但历史中不再追加一条相同用户消息。"""
+
+        from streamlit.testing.v1 import AppTest
+
+        from deepsearch.infrastructure.storage import ConversationStore
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            config = temporary_root / "config.json"
+            config.write_text(
+                json.dumps({"runtime_mode": "mock", "conversation_dir": "data/conversations"}),
+                encoding="utf-8",
+            )
+            store = ConversationStore(temporary_root / "data" / "conversations")
+            conversation = store.create()
+            user_message = {
+                "message_id": "1" * 32,
+                "role": "user",
+                "content": "继续测试研究",
+                "mode": "research",
+            }
+            store.append(conversation, user_message)
+
+            app = AppTest.from_file(str(root / "streamlit_app.py"))
+            app.session_state["config_path"] = str(config)
+            app.session_state["current_conversation_id"] = conversation["id"]
+            app.session_state["messages"] = [user_message]
+            app.session_state["resumable_run"] = {
+                "conversation_id": conversation["id"],
+                "question": "继续测试研究",
+                "requested_mode": "research",
+            }
+            app.run(timeout=20)
+            continue_button = next(button for button in app.button if button.label == "继续执行")
+            app = continue_button.click().run(timeout=30)
+
+            restored = store.load(conversation["id"])
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertFalse(any(button.label == "继续执行" for button in app.button))
+        self.assertTrue(any(button.label == "发送" for button in app.button))
+        self.assertEqual(
+            sum(message.get("role") == "user" for message in restored["messages"]),
+            1,
+        )
+        self.assertEqual(restored["messages"][-1]["role"], "assistant")
+
+    def test_question_mode_handles_current_time_without_search_or_artifact_actions(self):
         from streamlit.testing.v1 import AppTest
 
         root = Path(__file__).resolve().parents[1]
@@ -277,7 +563,7 @@ class StreamlitAppTests(unittest.TestCase):
             config = temporary_root / "config.json"
             config.write_text(
                 json.dumps({
-                    "runtime_mode": "online",
+                    "runtime_mode": "mock",
                     "conversation_dir": "data/conversations",
                     "reports_dir": "reports",
                 }),
@@ -287,13 +573,17 @@ class StreamlitAppTests(unittest.TestCase):
             app.session_state["config_path"] = str(config)
             app.run(timeout=20)
             mode_control = next(item for item in app.segmented_control if item.label == "工作模式")
-            self.assertEqual(mode_control.options, ["智能判断", "搜索", "研究"])
+            self.assertEqual(mode_control.options, ["问答", "搜索", "研究"])
+            self.assertEqual(mode_control.value, "问答")
 
-            app = app.chat_input[0].set_value("现在几点").run(timeout=20)
+            draft = next(item for item in app.text_area if item.key == "assistant-draft")
+            app = draft.set_value("现在几点").run(timeout=20)
+            send_button = next(button for button in app.button if button.label == "发送")
+            app = send_button.click().run(timeout=20)
             self.assertEqual(len(app.exception), 0)
-            self.assertTrue(any("直接回答模式" in status.label for status in app.status))
             self.assertTrue(any("北京时间" in item.value for item in app.markdown))
-            self.assertFalse(any(button.label == "改用搜索" for button in app.button))
+            self.assertTrue(any(button.label == "改用搜索重跑" for button in app.button))
+            self.assertTrue(any(button.label == "改用研究重跑" for button in app.button))
             self.assertFalse(any(button.label == "开始研究" for button in app.button))
             self.assertFalse(any(button.label == "下载" for button in app.button))
             self.assertFalse(any(button.label == "推送" for button in app.button))
@@ -306,6 +596,16 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(assistant["kind"], "chat")
             self.assertEqual(assistant["artifact_path"], "")
             self.assertEqual(assistant["sources"], [])
+
+            search_button = next(button for button in app.button if button.label == "改用搜索重跑")
+            app = search_button.click().run(timeout=30)
+            rerun_saved = json.loads(conversation_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(
+                sum(message.get("role") == "user" for message in rerun_saved["messages"]),
+                1,
+            )
+            self.assertEqual(rerun_saved["messages"][-1]["kind"], "search")
 
     def test_sidebar_recent_records_have_no_tooltip_and_all_records_can_be_deleted(self):
         from streamlit.testing.v1 import AppTest

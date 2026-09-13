@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 from collections import defaultdict
 
 from ..domain.models import Confidence, EvidenceGroup, QuestionType, SearchPlan, Source, ValidationResult
@@ -142,15 +143,55 @@ class AnswerValidator:
         return report.strip() + "\n"
 
 
-def source_table(sources: list[Source], heading: str = "全部来源") -> str:
-    """用当前 ``source_id`` 生成报告尾部的可追溯来源表。"""
+_SOURCE_SECTION_PATTERN = re.compile(r"(?ms)^##\s+(?:参考来源|全部来源)\s*$.*\Z")
 
-    lines = [f"## {heading}", "", "| 编号 | 标题 | 链接 | 质量分 | 状态 |", "|---|---|---|---:|---|"]
+
+def canonicalize_source_section(report: str, sources: list[Source], heading: str = "参考来源") -> str:
+    """用可信的 ``Source`` 数据替换模型生成的来源区。
+
+    来源标题和 URL 不应由模型自由排版：模型常会输出很长的裸链接，也可能
+    漏掉状态信息。统一替换后，旧报告在页面重绘时也能获得一致的可点击样式。
+    """
+
+    normalized = report.strip()
+    match = _SOURCE_SECTION_PATTERN.search(normalized)
+    body = normalized[: match.start()].rstrip() if match else normalized
+    return f"{body}\n\n{source_table(sources, heading=heading)}".strip() + "\n"
+
+
+def source_table(sources: list[Source], heading: str = "全部来源") -> str:
+    """生成紧凑、可点击且不暴露冗长裸 URL 的来源卡片。"""
+
+    lines = [f"## {heading}", ""]
+    if not sources:
+        return "\n".join([*lines, "> 暂无可用来源。"])
+
     for source in sources:
+        title = _escape_markdown_label(source.title.strip() or f"来源 {source.source_id}")
+        host = urlsplit(source.url).hostname or "无可访问链接"
+        host = host.removeprefix("www.")
         if source.provider == "mock":
-            status = "🧪 Mock 模拟内容"
+            status = "模拟来源"
         else:
-            status = "✅ 正文抓取成功" if source.fetched else "⚠️ 仅使用搜索摘要"
+            status = "已读取正文" if source.fetched else "搜索摘要"
         score = round(source.quality_score * 100)
-        lines.append(f"| [{source.source_id}] | {source.title.replace('|', '/')} | {source.url.replace('|', '%7C')} | {score} | {status} |")
-    return "\n".join(lines)
+        metadata = f"`{host}` · {status}"
+        if score > 0:
+            metadata += f" · 质量 {score}/100"
+        if source.url.startswith(("http://", "https://")):
+            destination = source.url.replace("<", "%3C").replace(">", "%3E").replace(" ", "%20")
+            title_markup = f"[{title}](<{destination}>)"
+        else:
+            title_markup = title
+        lines.extend([
+            f"> **[{source.source_id}] {title_markup}**  ",
+            f"> {metadata}",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def _escape_markdown_label(value: str) -> str:
+    """转义链接标签，避免来源标题破坏 Markdown 结构。"""
+
+    return re.sub(r"([\\\[\]])", r"\\\1", value).replace("\n", " ")

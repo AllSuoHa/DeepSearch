@@ -18,7 +18,7 @@ from ..application.prompts import (
     REVIEW_SYSTEM,
     REVIEW_USER,
 )
-from ..application.verification import source_table
+from ..application.verification import canonicalize_source_section, source_table
 from ..domain.models import Confidence, EvidenceGroup, QuestionType, RoundTrace, SearchPlan, Source
 
 
@@ -57,7 +57,7 @@ class MarkdownReporter:
             try:
                 stage = "证据整理"
                 self._progress("evidence_map", "正在把来源整理为结论、引用、冲突与证据缺口…")
-                evidence_raw = self.llm.generate(
+                evidence_raw = self._generate_json(
                     EVIDENCE_SYSTEM,
                     EVIDENCE_USER.format(
                         question=plan.question,
@@ -89,7 +89,7 @@ class MarkdownReporter:
                 )
                 stage = "独立审校"
                 self._progress("review", "正在独立检查直接性、重复、引用和排版并重写…")
-                reviewed_raw = self.llm.generate(
+                reviewed_raw = self._generate_json(
                     REVIEW_SYSTEM,
                     REVIEW_USER.format(
                         question=plan.question,
@@ -140,16 +140,31 @@ class MarkdownReporter:
 
     @staticmethod
     def _parse_json(value: str, stage: str) -> dict:
-        clean = value.strip()
-        if clean.startswith("```"):
-            clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean, flags=re.I | re.S)
+        clean = value.strip().lstrip("\ufeff")
+        # 小型思考模型偶尔会在合法 JSON 前后附加 <think> 或说明文字。
+        # 优先直接解析；失败后只提取第一个完整 JSON 对象，不尝试猜改字段。
         try:
             parsed = json.loads(clean)
-        except json.JSONDecodeError as exc:
-            raise ReportQualityError(f"{stage}没有返回有效 JSON") from exc
+        except json.JSONDecodeError as direct_error:
+            without_thinking = re.sub(r"<think>.*?</think>", "", clean, flags=re.I | re.S).strip()
+            start = without_thinking.find("{")
+            if start < 0:
+                raise ReportQualityError(f"{stage}没有返回有效 JSON") from direct_error
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(without_thinking[start:])
+            except json.JSONDecodeError as exc:
+                raise ReportQualityError(f"{stage}没有返回有效 JSON") from exc
         if not isinstance(parsed, dict):
             raise ReportQualityError(f"{stage}返回格式不是 JSON 对象")
         return parsed
+
+    def _generate_json(self, system: str, user: str) -> str:
+        """在适配器支持时启用结构化输出，否则保持通用文本协议。"""
+
+        generate_json = getattr(self.llm, "generate_json", None)
+        if callable(generate_json):
+            return generate_json(system, user)
+        return self.llm.generate(system, user)
 
     @staticmethod
     def _ensure_header(body: str, plan: SearchPlan, sources: list[Source], rounds: int) -> str:
@@ -165,12 +180,9 @@ class MarkdownReporter:
 
     @staticmethod
     def _ensure_sources(report: str, sources: list[Source]) -> str:
-        """用已知来源确定性补齐清单，避免终稿因模型漏排版而整体丢弃。"""
+        """用已知来源重建清单，避免模型漏项或输出冗长裸链接。"""
 
-        normalized = report.strip()
-        if "## 参考来源" not in normalized and "## 全部来源" not in normalized:
-            normalized += "\n\n" + source_table(sources, heading="参考来源")
-        return normalized + "\n"
+        return canonicalize_source_section(report, sources, heading="参考来源")
 
     def _deterministic_report(
         self,
