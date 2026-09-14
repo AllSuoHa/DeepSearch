@@ -36,6 +36,9 @@ class SearchProvider(Protocol):
     """统一不同搜索服务的最小接口。"""
 
     name: str
+    capabilities: frozenset[str]
+    last_status: str
+    last_error: str
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]: ...
 

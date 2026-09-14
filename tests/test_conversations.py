@@ -36,7 +36,12 @@ class ConversationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = ConversationStore(Path(directory) / "conversations")
             conversation = store.create()
-            store.append(conversation, {"role": "user", "content": "找资源", "mode": "search", "secret": "never"})
+            store.append(conversation, {
+                "role": "user",
+                "content": '找资源 DEEPSEARCH_API_KEY="conversation-secret"',
+                "mode": "search",
+                "secret": "never",
+            })
             store.append(conversation, {
                 "role": "assistant",
                 "content": "直接结果",
@@ -46,11 +51,12 @@ class ConversationTests(unittest.TestCase):
             })
 
             restored = store.load(conversation["id"])
-            self.assertEqual(restored["title"], "找资源")
+            self.assertIn("[REDACTED]", restored["title"])
             self.assertEqual(len(restored["messages"]), 2)
             saved = (Path(directory) / "conversations" / f"{conversation['id']}.json").read_text(encoding="utf-8")
             self.assertNotIn("never", saved)
             self.assertNotIn("must not persist", saved)
+            self.assertNotIn("conversation-secret", saved)
             self.assertEqual(store.list()[0]["id"], conversation["id"])
 
     def test_conversation_id_cannot_escape_storage_directory(self):
@@ -86,6 +92,36 @@ class ConversationTests(unittest.TestCase):
 
             restored = store.load(conversation["id"])
             self.assertEqual(len(restored["messages"]), 1)
+
+    def test_only_unanswered_last_user_message_can_be_edited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConversationStore(Path(directory) / "conversations")
+            conversation = store.create()
+            message_id = "9" * 32
+            store.append(conversation, {
+                "message_id": message_id,
+                "role": "user",
+                "content": "原问题",
+                "mode": "research",
+            })
+
+            self.assertTrue(store.replace_last_user_message(
+                conversation["id"], message_id, "修改后的问题", "search"
+            ))
+            edited = store.load(conversation["id"])
+            self.assertEqual(edited["messages"][-1]["content"], "修改后的问题")
+            self.assertEqual(edited["messages"][-1]["mode"], "search")
+            self.assertEqual(edited["title"], "修改后的问题")
+
+            store.append(edited, {
+                "message_id": "8" * 32,
+                "role": "assistant",
+                "content": "已经回答",
+                "kind": "chat",
+            })
+            self.assertFalse(store.replace_last_user_message(
+                conversation["id"], message_id, "不应覆盖", "chat"
+            ))
 
     def test_background_handle_and_failure_survive_page_rerun(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -193,6 +229,7 @@ class ConversationTests(unittest.TestCase):
                 "rounds": 2,
                 "stop_reason": "证据已充分",
                 "review_summary": ["结论已前置"],
+                "provider_failures": {"brave": "rate_limited"},
                 "sources": [{
                     "title": "Official guide",
                     "url": "https://example.org/guide",
@@ -200,6 +237,10 @@ class ConversationTests(unittest.TestCase):
                     "resource_type": "网页",
                     "risk_level": "可信来源",
                     "published_at": "2026-01-01",
+                    "retrieved_at": "2026-09-14T08:00:00+00:00",
+                    "freshness_status": "dated",
+                    "query": "RAG 长上下文 对比",
+                    "fetched": True,
                     "raw_page": "must not become reusable evidence",
                 }],
             },
@@ -212,6 +253,9 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(context.rounds, 2)
         self.assertEqual(context.review_summary, ("结论已前置",))
         self.assertEqual(context.sources[0].published_at, "2026-01-01")
+        self.assertEqual(context.sources[0].query, "RAG 长上下文 对比")
+        self.assertTrue(context.sources[0].fetched)
+        self.assertEqual(context.provider_failures, {"brave": "rate_limited"})
         self.assertEqual(context.sources[0].usable_text, "")
 
     def test_saved_search_restores_cards_and_migrates_legacy_snapshot_snippets(self):

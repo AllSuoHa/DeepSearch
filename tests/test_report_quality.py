@@ -39,12 +39,12 @@ class OneResultProvider:
     name = "fixture"
 
     def search(self, query: str, limit: int = 5):
-        return [SearchResult("Evidence", "https://example.org/evidence", "useful evidence", query, self.name)]
+        return [SearchResult("Answer evidence", "https://example.org/evidence", "useful answer evidence", query, self.name)]
 
 
 class OneSourceFetcher:
     def fetch_all(self, results):
-        return [Source("Evidence", "https://example.org/evidence", "useful evidence for the answer", query=results[0].query, provider="fixture")]
+        return [Source("Answer evidence", "https://example.org/evidence", "useful evidence for the answer", query=results[0].query, provider="fixture")]
 
 
 class AlwaysBadReporter:
@@ -93,11 +93,17 @@ class ReportQualityTests(unittest.TestCase):
         ])
         reporter = MarkdownReporter(llm)
         plan = SearchPlan("RAG or long context", QuestionType.COMPARISON, ["RAG or long context"], ["RAG"], 1)
-        source = Source("Paper", "https://example.org/paper", "RAG uses fresh external evidence.", source_id=1)
+        source = Source(
+            "Paper",
+            "https://example.org/paper",
+            'RAG uses fresh external evidence. DEEPSEARCH_API_KEY="source-secret"',
+            source_id=1,
+        )
 
         report = reporter.generate(plan, [source], [EvidenceGroup("Freshness", [1], Confidence.SINGLE)], [], 1)
 
         self.assertEqual(len(llm.calls), 3)
+        self.assertNotIn("source-secret", "\n".join(prompt for call in llm.calls for prompt in call))
         self.assertIn("证据编辑", llm.calls[0][0])
         self.assertIn("研究作者", llm.calls[1][0])
         self.assertIn("独立终稿编辑", llm.calls[2][0])

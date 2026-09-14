@@ -11,6 +11,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from typing import Any
@@ -121,7 +122,7 @@ class WebFetcher:
                     sources[index] = future.result()
                 except Exception as exc:  # defensive boundary around worker failures
                     result = results[index]
-                    logger.warning("抓取任务异常 url=%s error=%s", result.url, exc)
+                    logger.warning("抓取任务异常 error=%s", type(exc).__name__)
                     sources[index] = Source(
                         result.title, result.url, "", result.snippet, result.query,
                         result.provider, False, str(exc),
@@ -131,6 +132,8 @@ class WebFetcher:
                         published_at=result.published_at,
                         authors=result.authors,
                         doi=result.doi,
+                        retrieved_at=result.retrieved_at,
+                        freshness_status=result.freshness_status,
                     )
         return [source for source in sources if source is not None]
 
@@ -148,6 +151,8 @@ class WebFetcher:
                 published_at=result.published_at,
                 authors=result.authors,
                 doi=result.doi,
+                retrieved_at=result.retrieved_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                freshness_status=result.freshness_status,
             )
         request = urllib.request.Request(
             result.url,
@@ -174,14 +179,18 @@ class WebFetcher:
                 result.provider, True, resource_type=result.resource_type,
                 risk_level=result.risk_level, risk_reasons=result.risk_reasons,
                 published_at=result.published_at, authors=result.authors, doi=result.doi,
+                retrieved_at=result.retrieved_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                freshness_status=result.freshness_status,
             )
         except Exception as exc:
-            logger.warning("抓取失败 url=%s error=%s", result.url, exc)
+            logger.warning("抓取失败 error=%s", type(exc).__name__)
             return Source(
                 result.title, result.url, "", result.snippet, result.query, result.provider, False, str(exc),
                 resource_type=result.resource_type, risk_level=result.risk_level,
                 risk_reasons=result.risk_reasons, published_at=result.published_at,
                 authors=result.authors, doi=result.doi,
+                retrieved_at=result.retrieved_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                freshness_status=result.freshness_status,
             )
 
     @staticmethod

@@ -5,9 +5,11 @@ from .academic import CrossrefSearch, OpenAlexSearch
 from .brave import BraveSearch
 from .duckduckgo import DuckDuckGoSearch
 from .mock import MockSearch
+from .searxng import SearXNGSearch
+from .tavily import TavilySearch
 from .wikipedia import WikipediaSearch
 
 __all__ = [
     "SearchProvider", "BraveSearch", "DuckDuckGoSearch", "MockSearch", "WikipediaSearch",
-    "OpenAlexSearch", "CrossrefSearch",
+    "OpenAlexSearch", "CrossrefSearch", "TavilySearch", "SearXNGSearch",
 ]

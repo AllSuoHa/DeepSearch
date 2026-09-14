@@ -1,6 +1,6 @@
 # DeepSearch 2.2 架构说明
 
-> 当前实现基线 · 最后校准：2026-09-13
+> 当前实现基线 · 最后校准：2026-09-14
 
 ## 1. 系统定位与边界
 
@@ -75,17 +75,17 @@ DeepSearchAgent.run(AgentRequest) -> AgentRunResult
 
 Streamlit 页面不在主脚本线程中直接执行阻塞研究。页面先构造完整 `AgentRequest` 和 Agent，再把纯 Python 调用提交给共享的有限 `ThreadPoolExecutor`；后台线程只能向线程安全的 `RunProgressTracker` 写入应用层 phase/message，不能访问 Session State 或调用 `st.*`。
 
-页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 的外层标题在运行中保持稳定，只更新内部占位符中的阶段、说明和用时，因此用户手动展开后不会被增量更新收起。`Future` 与 tracker 由进程级、加锁的短期注册表按随机 run ID 保存，Session State 只保留该 ID；Streamlit 页面切换终止旧页面脚本时不会取消 Future，返回首页后会接回同一任务。展示层还会比较 handle 的 `conversation_id` 与当前会话，避免活动状态串入其他历史记录。结果或错误以稳定消息 ID 幂等写回发起任务的会话，再由页面渲染并清除停止按钮。显式停止会取消 tracker/Future，并保存最小重启描述；“继续执行”会复用原用户消息从头重新运行，不伪装成模型级断点续传。该机制覆盖同一进程内的页面往返，不等同于跨进程任务队列。
+页面线程对齐单调时钟的整数秒轮询 tracker，同时允许阶段事件提前唤醒。原生紧凑 `st.status` 的外层标题在运行中保持稳定，只更新内部占位符中的阶段、说明和用时，因此用户手动展开后不会被增量更新收起。`Future` 与 tracker 由进程级、加锁的短期注册表按随机 run ID 保存，Session State 只保留该 ID；Streamlit 页面切换终止旧页面脚本时不会取消 Future，返回首页后会接回同一任务。展示层还会比较 handle 的 `conversation_id` 与当前会话，避免活动状态串入其他历史记录。结果或错误以稳定消息 ID 幂等写回发起任务的会话，再由页面渲染并清除停止按钮。运行槽由 `st.empty` 承载并在消费后整体清除，结果操作栏只绑定最新完整助手消息。显式停止会取消 tracker/Future，解锁并回填输入框；“继续执行”复用原用户消息从头重跑，编辑稿则只替换末尾尚无回答的用户消息，不伪装成模型级断点续传。该机制覆盖同一进程内的页面往返，不等同于跨进程任务队列。
 
 浏览器侧输入快捷键和页面滚动隔离在 `presentation/web/scroll_controls.py` 的内联 CCv2 组件。组件挂载于耗时研究之前，以 Shadow DOM 和主题变量绘制回顶/到底按钮，从受信任候选中动态定位实际滚动节点；按钮只在主内容区滚轮活动时按可用方向短暂淡入，空闲后淡出。点击滚动由可随滚轮取消的帧动画完成，不传递业务数据、不阻止默认滚轮，也不触发应用 rerun。组件还在捕获阶段处理首页输入框的 Enter：普通 Enter 把当时的纯文本作为 trigger 值交给 Python 的既有提交回调，Shift+Enter 与 Ctrl+Enter 保留为换行。用户文本不会插入组件的受信任 HTML、CSS 或 JavaScript；重复提交仍由页面状态机和进程级原子闸门阻止。其余页面行为继续优先使用原生 Streamlit API。
 
 ## 4. 路由、直接回答与搜索流程
 
-`IntentClassifier` 只在旧入口传入 `AUTO` 时运行；`CHAT/SEARCH/RESEARCH` 均尊重用户选择。`ChatService` 不再进行第二次意图分类，也不会返回切换模式建议；它仅执行本地确定性工具或调用问答模型。问答模型通过系统约束说明实时信息的不确定性，不能声称已联网或伪造来源。搜索/研究重跑只由展示层的显式按钮触发。
+`IntentClassifier` 只在旧入口传入 `AUTO` 时运行；`CHAT/SEARCH/RESEARCH` 均尊重用户选择。`ChatService` 不再进行第二次意图分类或实时关键词拦截：有效 `chat_llm` 始终先收到问题。系统提示明确声明没有搜索、网页或外部 Tool，并禁止伪造实时事实；搜索/研究重跑只由展示层的显式按钮触发。
 
 ### 4.1 快速回答隔离
 
-`ChatService` 位于应用层，先用本地时钟和受限算术求值处理确定性请求，再按需使用可选的 `ChatModel`。组合根仅在 `chat_llm` 的 Base URL、模型和 API Key 全部存在时创建独立客户端；研究模型实例不会成为快速回答的回退。模型未配置、超时、限流或失败时也不会自动调用搜索或研究。
+`ChatService` 位于应用层，先使用可选的 `ChatModel`；只有模型未配置或调用失败时，本地时钟、受限算术和安全说明才作为降级。组合根通常创建独立问答客户端；用户也可显式启用 `chat_uses_research_model` 复用研究连接参数，但运行模式仍是 CHAT，不进入研究服务。模型失败时不会自动调用搜索或研究。
 
 发送给模型的上下文最多保留最近 6 条、每条最多 600 字符，只允许 user/assistant 纯文本；搜索快照和研究报告不会进入上下文，常见密钥赋值和令牌形态在发送前脱敏。模型输出被限制为最多 400 字符。
 
@@ -112,9 +112,17 @@ sequenceDiagram
     A-->>UI: AgentRunResult(search=...)
 ```
 
-在线通用搜索源由 `search_provider_order` 决定：Brave 仅在 Key 存在时创建，DuckDuckGo 和 Wikipedia 可免费使用。`search_content_type` 以确定性后缀聚焦综合、新闻、知识、公告或学术内容；选择学术或问题自身具有学术意图时追加 OpenAlex 与 Crossref。该过程不调用模型。
+在线搜索源由 `search_provider_order` 与 `disabled_search_providers` 决定，七类来源都能独立启用、禁用和排序。Tavily/Brave 仅在对应 Key 存在时创建，SearXNG 仅在配置 Base URL 时创建，DuckDuckGo 是无 Key 备用；Wikipedia、OpenAlex、Crossref 是专用来源。`SearchProviderRegistry` 先把查询分类为通用、时效、学术、背景或官方，再按 Provider 能力路由：Wikipedia 不进入默认通用/实时查询，学术问题才选择已启用的 OpenAlex/Crossref。单源有限重试，连续失败会在当前服务实例中临时熔断，失败原因进入结果警告。该过程不调用模型。
+
+排序先计算标题、摘要、正文与问题/子问题的相关性并剔除明显无关结果；域名权威性只在相关性成立后加分。时效查询保存发布日期（如 Provider 提供）、检索时间和 `dated/unknown` 状态；未知时效不会由模型自行补全。搜索结果与正文缓存有 TTL，时效查询的搜索缓存上限为 5 分钟。
 
 搜索不抓取全文、不调用模型，也不进入研究质量评分。它输出 `SearchResponse`，随后由展示层保存为 `data/artifacts/` 下的 Markdown 快照。
+
+### 4.3 上下文策略与审计
+
+`AgentRequest.context_policy` 是统一入口的语义来源：`fresh` 禁止读取上一研究，`conversation` 由 `ContextResolver` 判断是否存在明确指代，`follow_up` 表示用户明确要求沿用上一结果。模式重跑、重新执行、相同问题和带时效信号的问题强制为 `fresh`。上一研究还必须与当前 `conversation_id` 对应，避免新建/切换会话或服务重启后串用状态。
+
+`AgentRunResult.audit` 保存用户选择模式、实际模式、实际模型、是否搜索、实际 Provider 和上下文策略。展示层把这些非敏感字段写入会话并在“运行信息”显示；API Key、请求头和完整网页正文不进入审计数据。
 
 关键不变量：
 
@@ -249,7 +257,7 @@ logs/deepsearch.log                 轮转日志
 
 ### 7.3 会话最小化
 
-会话通过白名单保存消息字段：文本、模式、结果类型、资产路径、轻量来源元数据、问题摘要、轮次、停止原因、审校摘要、查询、警告和投递状态。密钥、任意附加字段和完整网页正文不会进入会话文件。会话文件名只能来自 32 位十六进制随机 ID；读取时要求文件名与 JSON 内嵌 ID 一致，保存时再次验证 ID，防止损坏数据把写入路径带出会话目录。
+会话通过白名单保存消息字段：文本、模式、结果类型、资产路径、轻量来源元数据、问题摘要、轮次、停止原因、审校摘要、查询、警告和投递状态。密钥、任意附加字段和完整网页正文不会进入会话文件；误粘贴到问题、来源或 URL 参数中的常见凭据会在模型输入、会话、报告正文和文件名边界统一替换为 `[REDACTED]`，搜索与抓取日志不记录原始查询和 URL。会话文件名只能来自 32 位十六进制随机 ID；读取时要求文件名与 JSON 内嵌 ID 一致，保存时再次验证 ID，防止损坏数据把写入路径带出会话目录。
 
 从磁盘恢复研究时，只重建追问所需的最小 `ResearchResult`。由于来源正文为空，后续追问通常重新检索，避免把过时摘要误当成完整证据。
 
@@ -305,7 +313,7 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 ## 11. 配置与密钥
 
-`load_settings()` 的优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入研究模型、快速回答模型、Brave 和联动凭据。
+`load_settings()` 的非敏感配置优先级是：默认值 → JSON → 环境变量 → 调用覆盖。Web 再从 Streamlit Secrets 注入研究模型、快速回答模型、Tavily、Brave 和联动凭据。所有 API Key 都忽略 JSON 中的值，只接受环境变量或 Secrets。
 
 `save_settings()` 使用进程内锁、临时文件和原子替换。研究/快速回答模型 Key、CustomerService integration key 和 Bearer key 无论是否存在于内存，都以空值写回普通配置。远端快速回答 API Key 只从 `DEEPSEARCH_CHAT_API_KEY` 或 Streamlit Secrets 读取；即使手工写进 JSON 也会被忽略。本机回环地址由配置层自动补协议占位 Key，不保存任何真实凭据。
 
@@ -319,16 +327,18 @@ GET  {base_url}/api/v2/integrations/deepsearch/documents/{external_id}
 
 | 需求 | 实现方式 |
 |---|---|
-| 新搜索源 | 实现 `SearchProvider`，在组合根注册 |
+| 新搜索源 | 审查许可证、安全和数据流后实现 `SearchProvider`，声明能力并在组合根注册 |
 | 新正文读取器 | 实现 `SourceFetcher` |
 | 新路由策略 | 扩展或替换 `IntentClassifier` |
-| 新快速回答模型服务 | 保持 Chat Completions 兼容，配置独立 `chat_llm`；不得借用研究模型 |
+| 新快速回答模型服务 | 保持 Chat Completions 兼容，配置独立 `chat_llm`；只有显式开关允许复用研究连接 |
 | 新规划/停止策略 | 实现 `Planner` |
 | 新报告生成器 | 实现 `Reporter`，继续接受结构化来源和计划 |
 | 新质量规则 | 扩展 `AnswerValidator` 或实现 `QualityEvaluatorPort` |
 | 新存储 | 实现 `ReportStorage` 或独立 Artifact adapter |
 | 新投递目标 | 复用 `DeliveryArtifact`，增加 publisher |
 | 跨进程可恢复后台任务 | 保留现有 run ID、`AgentRequest`、轨迹和质量门，外接持久状态机 |
+
+Tool 是可执行能力，Function Calling 是模型请求 Tool 的协议，Skill 是工作流说明，SearchProvider 才是本项目的检索适配器。当前研究继续使用确定性编排。未来若给问答模型开放 Function Calling，必须增加工具白名单、参数 Schema 校验、调用轮数、超时和输出上限，禁止任意 URL/文件/命令，并把结果作为 tool message 返回模型；Skill 文件本身不得被误认为网络能力。
 
 ## 13. 必须保持的不变量
 

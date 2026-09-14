@@ -11,6 +11,11 @@ class SearchProvider(ABC):
     """搜索源抽象：失败返回空列表，由研究服务统一决定是否降级。"""
 
     name = "base"
+    capabilities = frozenset({"general"})
+
+    def __init__(self) -> None:
+        self.last_status = "available"
+        self.last_error = ""
 
     @abstractmethod
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:

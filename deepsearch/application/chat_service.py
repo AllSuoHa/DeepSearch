@@ -14,14 +14,10 @@ from .intent import IntentClassifier
 from .ports import ChatModel, Progress
 from .prompts import CHAT_SYSTEM
 from ..domain.models import ChatResult, ChatTurn
+from ..security import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)((?:DEEPSEARCH_[A-Z0-9_]*(?:KEY|TOKEN|SECRET)|API[ _-]?KEY|TOKEN|SECRET|PASSWORD)"
-    r"\s*[:=]\s*)[\"']?[^\s,;\"']+"
-)
-_TOKEN_LIKE_VALUE = re.compile(r"\b(?:sk|key|token)-[A-Za-z0-9_-]{8,}\b", re.IGNORECASE)
 _LOW_VALUE_HISTORY_ANSWERS = {
     "您好！请问有什么可以帮助您的吗？",
     "您好！请问有什么可以帮助您的吗",
@@ -36,17 +32,19 @@ _LOW_VALUE_HISTORY_PREFIXES = (
 
 
 class ChatService:
-    """提供直接回答；本地工具优先，模型失败时也不会转用研究模型。"""
+    """提供直接回答；显式问答始终先调用问答模型，失败也不转用研究模型。"""
 
     def __init__(
         self,
         model: ChatModel | None = None,
         maximum_chars: int = 400,
         now_provider: Callable[[tzinfo], datetime] | None = None,
+        model_name: str = "",
     ) -> None:
         self.model = model
         self.maximum_chars = max(120, maximum_chars)
         self._now_provider = now_provider or datetime.now
+        self.model_name = model_name
 
     def reply(
         self,
@@ -62,14 +60,6 @@ class ChatService:
         started = time.perf_counter()
         notify = progress or (lambda phase, message: None)
         notify("chat", "正在生成直接回复…")
-
-        local_answer = self._local_tool_reply(question, locale, region)
-        if local_answer is not None:
-            return ChatResult(
-                question=question,
-                answer=local_answer,
-                elapsed_seconds=time.perf_counter() - started,
-            )
 
         model_error: Exception | None = None
         if self.model is not None:
@@ -93,16 +83,21 @@ class ChatService:
                     answer=self._trim(answer),
                     used_model=True,
                     elapsed_seconds=time.perf_counter() - started,
+                    model_name=self.model_name,
                 )
             except Exception as exc:  # 模型异常必须隔离，且绝不回退到研究模型。
                 model_error = exc
                 logger.warning("快速回答模型不可用，改用本地回复 error=%s", type(exc).__name__)
 
+        # 本地时间和计算器只是模型不可用时的确定性下限；它们不会再抢在
+        # 用户明确配置的问答模型前执行，也不会把实时问题改路由到搜索。
+        local_answer = self._local_tool_reply(question, locale, region)
         return ChatResult(
             question=question,
-            answer=self._local_reply(question, model_error=model_error),
+            answer=local_answer or self._local_reply(question, model_error=model_error),
             used_fallback=True,
             elapsed_seconds=time.perf_counter() - started,
+            model_name=self.model_name,
         )
 
     def _user_prompt(self, question: str, history: tuple[ChatTurn, ...]) -> str:
@@ -186,18 +181,13 @@ class ChatService:
         return "当前未配置问答模型，因此暂时无法可靠生成答案；请配置后直接重试。"
 
     def _local_tool_reply(self, question: str, locale: str, region: str) -> str | None:
-        """优先执行无需网络的确定性工具，减少不必要的模型调用。"""
+        """仅在问答模型不可用时提供无需网络的确定性降级。"""
 
         if IntentClassifier.is_local_time_request(question):
             return self._time_reply(question, locale, region)
         calculation = self._calculator_reply(question)
         if calculation is not None:
             return calculation
-        if IntentClassifier.is_realtime_fact_request(question):
-            return (
-                "我当前没有接入实时数据，无法可靠确认这个问题的最新情况。"
-                "如果你提供已有数据或具体内容，我可以直接帮你解释和分析。"
-            )
         return None
 
     def _time_reply(self, question: str, locale: str, region: str) -> str:
@@ -296,5 +286,4 @@ class ChatService:
     def _redact(value: str) -> str:
         """在发送前移除常见密钥赋值和令牌形态，避免模型收到凭据。"""
 
-        text = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", value)
-        return _TOKEN_LIKE_VALUE.sub("[REDACTED]", text)
+        return redact_sensitive_text(value)

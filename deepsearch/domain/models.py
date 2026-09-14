@@ -30,6 +30,14 @@ class WorkMode(str, Enum):
     RESEARCH = "research"
 
 
+class ContextPolicy(str, Enum):
+    """一次执行如何使用既有会话内容；重跑必须显式使用 ``FRESH``。"""
+
+    FRESH = "fresh"
+    CONVERSATION = "conversation"
+    FOLLOW_UP = "follow_up"
+
+
 class SearchContentType(str, Enum):
     """搜索内容偏好；用于查询聚焦，不改变搜索源或启用大模型。"""
 
@@ -127,6 +135,8 @@ class SearchResult:
     published_at: str = ""
     authors: tuple[str, ...] = ()
     doi: str = ""
+    retrieved_at: str = ""
+    freshness_status: str = "unknown"
 
 
 @dataclass(slots=True)
@@ -150,6 +160,8 @@ class Source:
     published_at: str = ""
     authors: tuple[str, ...] = ()
     doi: str = ""
+    retrieved_at: str = ""
+    freshness_status: str = "unknown"
 
     @property
     def usable_text(self) -> str:
@@ -260,6 +272,7 @@ class ResearchResult:
     scorecard: ResearchScorecard = field(default_factory=ResearchScorecard)
     direct_answer: str = ""
     review_summary: tuple[str, ...] = ()
+    provider_failures: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +294,8 @@ class AgentRequest:
     region: str = "CN"
     conversation_id: str = ""
     chat_history: tuple[ChatTurn, ...] = ()
+    context_policy: ContextPolicy = ContextPolicy.CONVERSATION
+    previous_research: ResearchResult | None = None
 
 
 @dataclass(slots=True)
@@ -292,6 +307,7 @@ class ChatResult:
     used_model: bool = False
     used_fallback: bool = False
     elapsed_seconds: float = 0.0
+    model_name: str = ""
 
 
 @dataclass(slots=True)
@@ -305,6 +321,19 @@ class SearchResponse:
     warnings: list[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     artifact_path: Path | None = None
+    provider_failures: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class RunAudit:
+    """可安全展示和持久化的实际执行信息，不包含密钥或请求正文。"""
+
+    requested_mode: WorkMode
+    actual_mode: WorkMode
+    model_name: str = ""
+    used_search: bool = False
+    search_providers: tuple[str, ...] = ()
+    context_policy: ContextPolicy = ContextPolicy.FRESH
 
 
 @dataclass(slots=True)
@@ -316,6 +345,7 @@ class AgentRunResult:
     search: SearchResponse | None = None
     research: ResearchResult | None = None
     chat: ChatResult | None = None
+    audit: RunAudit | None = None
 
     @property
     def content(self) -> str:

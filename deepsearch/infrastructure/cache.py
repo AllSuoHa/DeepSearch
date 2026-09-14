@@ -33,7 +33,15 @@ class ResearchCache:
     def get_search(self, provider: str, query: str, limit: int) -> list[SearchResult] | None:
         """读取某搜索源和查询组合的缓存结果。"""
 
-        data = self._get("search", f"{provider}|{limit}|{query}")
+        # 时效查询只短暂复用，避免“今天/最新”的旧结果被默认六小时缓存。
+        current = any(marker in query.casefold() for marker in (
+            "今天", "今日", "最新", "当前", "现在", "实时", "新闻", "价格", "天气",
+        ))
+        data = self._get(
+            "search",
+            f"{provider}|{limit}|{query}",
+            ttl_seconds=min(self.ttl_seconds, 300) if current else self.ttl_seconds,
+        )
         if data is None:
             return None
         try:
@@ -80,14 +88,14 @@ class ResearchCache:
                     continue
         return removed
 
-    def _get(self, namespace: str, key: str):
+    def _get(self, namespace: str, key: str, ttl_seconds: int | None = None):
         """读取未过期缓存；损坏、缺失和过期都按 miss 安全处理。"""
 
         if not self.enabled:
             return None
         path = self._path(namespace, key)
         try:
-            if time.time() - path.stat().st_mtime > self.ttl_seconds:
+            if time.time() - path.stat().st_mtime > (ttl_seconds or self.ttl_seconds):
                 self.stats.misses += 1
                 try:
                     path.unlink()

@@ -137,6 +137,8 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn('[data-testid="stBottomBlockContainer"]', css)
         self.assertIn('.st-key-home-scroll-controls', css)
         self.assertIn('key=f"research-report-{message_key}"', home)
+        self.assertIn("report_body_for_conversation(complete_report)", home)
+        self.assertIn("normalize_markdown_document(str(report[\"content\"]))", history)
         self.assertIn('[class*="st-key-research-report-"]', css)
         self.assertIn('key=f"research-report-library-{asset_key}"', history)
         self.assertNotIn('.st-key-history-report-preview', css)
@@ -202,7 +204,8 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn('str(st.session_state.get("pending_question", "")).strip()', home)
         self.assertIn("claim_submission(", home)
         self.assertIn('run_output_id = active_run_id or str(st.session_state.get("pending_run_id", ""))', home)
-        self.assertIn('key=f"active-run-output-{run_output_id}"', home)
+        self.assertIn('surface = target.container(key=f"active-run-output-{handle.run_id}")', home)
+        self.assertIn("target.empty()", home)
         self.assertIn("render_active_background_run(handle, stop_button_slot, active_run_output_slot)", home)
         prompt_branch = home.split("if prompt:", 1)[1].split(
             'elif st.session_state.agent_run_state == "running":', 1
@@ -377,7 +380,9 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(len(completed_app.exception), 0)
             self.assertFalse(any(button.label == "暂停生成" for button in completed_app.button))
             self.assertTrue(any(button.label == "发送" for button in completed_app.button))
-            self.assertTrue(any("北京时间" in item.value for item in completed_app.markdown))
+            # 问答模型已配置时，本地时间工具不再抢在模型前；这里只验证
+            # 仍产生问答消息并恢复输入控件，不绑定某个模型的具体措辞。
+            self.assertEqual(len(completed_app.chat_message), 2)
             self.assertTrue(any(item.value == "今天想了解什么？" for item in completed_app.title))
 
         source = (root / "app_pages" / "home.py").read_text(encoding="utf-8")
@@ -388,6 +393,9 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertIn('with st.popover("高级选项", width=100)', source)
         self.assertIn("on_click=submit_composer", source)
         self.assertIn('"暂停生成"', source)
+        self.assertIn("render_running_question_actions", source)
+        self.assertIn('"修改问题"', source)
+        self.assertNotIn('with st.popover("继续追问"', source)
 
     def test_saved_model_failure_renders_after_page_return_with_retry(self):
         """错误重试只能消费一次，并复用持久化的原用户消息。"""
@@ -538,8 +546,13 @@ class StreamlitAppTests(unittest.TestCase):
                 "conversation_id": conversation["id"],
                 "question": "继续测试研究",
                 "requested_mode": "research",
+                "message_id": user_message["message_id"],
             }
             app.run(timeout=20)
+            draft = next(item for item in app.text_area if item.key == "assistant-draft")
+            self.assertFalse(draft.disabled)
+            self.assertEqual(draft.value, "继续测试研究")
+            self.assertTrue(any(button.label == "发送" for button in app.button))
             continue_button = next(button for button in app.button if button.label == "继续执行")
             app = continue_button.click().run(timeout=30)
 
@@ -552,6 +565,57 @@ class StreamlitAppTests(unittest.TestCase):
             sum(message.get("role") == "user" for message in restored["messages"]),
             1,
         )
+        self.assertEqual(restored["messages"][-1]["role"], "assistant")
+
+    def test_stopped_run_can_edit_and_replace_unanswered_question(self):
+        """暂停后发送修改稿应原位更新用户消息，再执行新问题。"""
+
+        from streamlit.testing.v1 import AppTest
+
+        from deepsearch.infrastructure.storage import ConversationStore
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            config = temporary_root / "config.json"
+            config.write_text(
+                json.dumps({"runtime_mode": "mock", "conversation_dir": "data/conversations"}),
+                encoding="utf-8",
+            )
+            store = ConversationStore(temporary_root / "data" / "conversations")
+            conversation = store.create()
+            user_message = {
+                "message_id": "7" * 32,
+                "role": "user",
+                "content": "原始问题",
+                "mode": "research",
+            }
+            store.append(conversation, user_message)
+
+            app = AppTest.from_file(str(root / "streamlit_app.py"))
+            app.session_state["config_path"] = str(config)
+            app.session_state["current_conversation_id"] = conversation["id"]
+            app.session_state["messages"] = [user_message]
+            app.session_state["work_mode"] = "研究"
+            app.session_state["resumable_run"] = {
+                "conversation_id": conversation["id"],
+                "question": "原始问题",
+                "requested_mode": "research",
+                "message_id": user_message["message_id"],
+            }
+            app.run(timeout=20)
+            draft = next(item for item in app.text_area if item.key == "assistant-draft")
+            app = draft.set_value("修改后的问题").run(timeout=20)
+            send_button = next(button for button in app.button if button.label == "发送")
+            app = send_button.click().run(timeout=30)
+            restored = store.load(conversation["id"])
+
+        self.assertEqual(len(app.exception), 0)
+        user_messages = [
+            message for message in restored["messages"] if message.get("role") == "user"
+        ]
+        self.assertEqual(len(user_messages), 1)
+        self.assertEqual(user_messages[0]["content"], "修改后的问题")
         self.assertEqual(restored["messages"][-1]["role"], "assistant")
 
     def test_question_mode_handles_current_time_without_search_or_artifact_actions(self):
@@ -581,7 +645,7 @@ class StreamlitAppTests(unittest.TestCase):
             send_button = next(button for button in app.button if button.label == "发送")
             app = send_button.click().run(timeout=20)
             self.assertEqual(len(app.exception), 0)
-            self.assertTrue(any("北京时间" in item.value for item in app.markdown))
+            self.assertEqual(len(app.chat_message), 2)
             self.assertTrue(any(button.label == "改用搜索重跑" for button in app.button))
             self.assertTrue(any(button.label == "改用研究重跑" for button in app.button))
             self.assertFalse(any(button.label == "开始研究" for button in app.button))
@@ -596,6 +660,11 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertEqual(assistant["kind"], "chat")
             self.assertEqual(assistant["artifact_path"], "")
             self.assertEqual(assistant["sources"], [])
+            self.assertEqual(assistant["mode"], "chat")
+            self.assertFalse(assistant["used_search"])
+            self.assertEqual(assistant["search_providers"], [])
+            self.assertEqual(assistant["context_policy"], "conversation")
+            self.assertTrue(any("用户选择" in item.value for item in app.markdown))
 
             search_button = next(button for button in app.button if button.label == "改用搜索重跑")
             app = search_button.click().run(timeout=30)
@@ -605,7 +674,14 @@ class StreamlitAppTests(unittest.TestCase):
                 sum(message.get("role") == "user" for message in rerun_saved["messages"]),
                 1,
             )
-            self.assertEqual(rerun_saved["messages"][-1]["kind"], "search")
+            rerun_assistant = rerun_saved["messages"][-1]
+            self.assertEqual(rerun_assistant["kind"], "search")
+            self.assertEqual(rerun_assistant["mode"], "search")
+            self.assertEqual(rerun_assistant["model_name"], "")
+            self.assertEqual(rerun_assistant["search_providers"], ["mock"])
+            self.assertEqual(rerun_assistant["context_policy"], "fresh")
+            self.assertTrue(any("实际执行：搜索" in item.value for item in app.markdown))
+            self.assertTrue(any("搜索源：mock" in item.value for item in app.markdown))
 
     def test_sidebar_recent_records_have_no_tooltip_and_all_records_can_be_deleted(self):
         from streamlit.testing.v1 import AppTest
@@ -670,6 +746,11 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertTrue(any("搜索" in label for label in labels))
         self.assertTrue(any("研究" in label and "快速回答" in label for label in labels))
         self.assertTrue(any("知识库联动" in label for label in labels))
+        self.assertTrue(any(item.label == "研究模型 Base URL" for item in app.text_input))
+        self.assertTrue(any(item.label == "快速回答模型 Base URL" for item in app.text_input))
+        self.assertTrue(any(item.label == "SearXNG Base URL" for item in app.text_input))
+        self.assertTrue(any(item.label == "问答模型与研究模型使用相同配置" for item in app.toggle))
+        self.assertTrue(any(button.label == "测试 DuckDuckGo" for button in app.button))
 
     def test_library_page_uses_the_shared_confirmed_trash_action(self):
         from streamlit.testing.v1 import AppTest
@@ -731,6 +812,11 @@ class StreamlitAppTests(unittest.TestCase):
             trash_app.session_state["config_path"] = str(config)
             trash_app.run(timeout=20)
             self.assertEqual(len(trash_app.exception), 0)
+            self.assertFalse(any(item.label == "选择文件" for item in trash_app.selectbox))
+            trash_app.session_state["trash_table"] = {
+                "selection": {"rows": [0], "columns": [], "cells": []},
+            }
+            trash_app.run(timeout=20)
             trash_app = next(
                 button for button in trash_app.button if button.label == "恢复到资料库"
             ).click().run(timeout=20)
@@ -746,6 +832,10 @@ class StreamlitAppTests(unittest.TestCase):
             trash_app = AppTest.from_file(str(root / "app_pages" / "trash.py"))
             trash_app.session_state["config_path"] = str(config)
             trash_app.run(timeout=20)
+            trash_app.session_state["trash_table"] = {
+                "selection": {"rows": [0], "columns": [], "cells": []},
+            }
+            trash_app.run(timeout=20)
             trash_app = next(
                 button for button in trash_app.button if button.label == "永久删除"
             ).click().run(timeout=20)
@@ -759,6 +849,8 @@ class StreamlitAppTests(unittest.TestCase):
 
     def test_library_groups_reports_and_supports_confirmed_batch_trash(self):
         from streamlit.testing.v1 import AppTest
+
+        from deepsearch.infrastructure.storage import FileArtifactTrash
 
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
@@ -811,6 +903,51 @@ class StreamlitAppTests(unittest.TestCase):
             self.assertFalse(second.exists())
             self.assertEqual(len(list((temporary_root / "data" / "trash").glob("*.trash.json"))), 2)
             self.assertTrue(any("2 份文档" in toast.value for toast in app.toast))
+
+            trash_app = AppTest.from_file(str(root / "app_pages" / "trash.py"))
+            trash_app.session_state["config_path"] = str(config)
+            trash_app.run(timeout=20)
+            trash_app.session_state["trash_table"] = {
+                "selection": {"rows": [0, 1], "columns": [], "cells": []},
+            }
+            trash_app.run(timeout=20)
+            self.assertEqual(len(trash_app.exception), 0)
+            self.assertTrue(any(button.label == "恢复到资料库（2）" for button in trash_app.button))
+            self.assertTrue(any(button.label == "永久删除（2）" for button in trash_app.button))
+            download = next(
+                item for item in trash_app.get("download_button")
+                if item.label == "下载（仅单选）"
+            )
+            self.assertTrue(download.disabled)
+            trash_app = next(
+                button for button in trash_app.button if button.label == "恢复到资料库（2）"
+            ).click().run(timeout=20)
+            self.assertEqual(len(trash_app.exception), 0)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            self.assertEqual(list((temporary_root / "data" / "trash").glob("*.trash.json")), [])
+
+            trash = FileArtifactTrash(
+                temporary_root / "data" / "trash",
+                (reports, artifacts),
+            )
+            deleted_paths = (trash.move(first), trash.move(second))
+            trash_app = AppTest.from_file(str(root / "app_pages" / "trash.py"))
+            trash_app.session_state["config_path"] = str(config)
+            trash_app.run(timeout=20)
+            trash_app.session_state["trash_table"] = {
+                "selection": {"rows": [0, 1], "columns": [], "cells": []},
+            }
+            trash_app.run(timeout=20)
+            trash_app = next(
+                button for button in trash_app.button if button.label == "永久删除（2）"
+            ).click().run(timeout=20)
+            trash_app = next(
+                button for button in trash_app.button if button.label == "确认永久删除"
+            ).click().run(timeout=20)
+            self.assertEqual(len(trash_app.exception), 0)
+            self.assertTrue(all(not path.exists() for path in deleted_paths))
+            self.assertEqual(trash.list_items(), [])
 
     def test_library_search_preview_reuses_chat_result_cards(self):
         """资料库应从会话恢复来源字段，并显示聊天页同款搜索卡片。"""

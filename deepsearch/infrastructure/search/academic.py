@@ -30,8 +30,10 @@ class OpenAlexSearch(SearchProvider):
     """读取 OpenAlex 作品元数据、作者和可用摘要。"""
 
     name = "openalex"
+    capabilities = frozenset({"academic"})
 
     def __init__(self, timeout: float = 8.0) -> None:
+        super().__init__()
         self.timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
@@ -41,8 +43,11 @@ class OpenAlexSearch(SearchProvider):
         try:
             payload = _request_json(f"https://api.openalex.org/works?{params}", self.timeout, "DeepSearch/2.2")
         except Exception as exc:
-            logger.warning("OpenAlex 搜索失败 query=%r error=%s", query, type(exc).__name__)
+            self.last_status = "rate_limited" if getattr(exc, "code", 0) == 429 else "connection_failed"
+            self.last_error = "搜索服务限流" if self.last_status == "rate_limited" else type(exc).__name__
+            logger.warning("OpenAlex 搜索失败 error=%s", type(exc).__name__)
             return []
+        self.last_status, self.last_error = "available", ""
         results = []
         for item in payload.get("results", [])[:limit]:
             title = str(item.get("display_name", "")).strip()
@@ -68,8 +73,10 @@ class CrossrefSearch(SearchProvider):
     """使用 Crossref 补充 DOI、出版日期和文献落地页。"""
 
     name = "crossref"
+    capabilities = frozenset({"academic"})
 
     def __init__(self, timeout: float = 8.0) -> None:
+        super().__init__()
         self.timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
@@ -79,8 +86,11 @@ class CrossrefSearch(SearchProvider):
         try:
             payload = _request_json(f"https://api.crossref.org/works?{params}", self.timeout, "DeepSearch/2.2")
         except Exception as exc:
-            logger.warning("Crossref 搜索失败 query=%r error=%s", query, type(exc).__name__)
+            self.last_status = "rate_limited" if getattr(exc, "code", 0) == 429 else "connection_failed"
+            self.last_error = "搜索服务限流" if self.last_status == "rate_limited" else type(exc).__name__
+            logger.warning("Crossref 搜索失败 error=%s", type(exc).__name__)
             return []
+        self.last_status, self.last_error = "available", ""
         results = []
         for item in payload.get("message", {}).get("items", [])[:limit]:
             titles = item.get("title") or []

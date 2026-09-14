@@ -9,6 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from deepsearch.application.verification import normalize_markdown_document
 from deepsearch.infrastructure.customer_service import CustomerServicePublisher, DeliveryError
 from deepsearch.infrastructure.storage import (
     ConversationStore,
@@ -489,4 +490,5 @@ elif report["kind"] == "搜索快照":
         st.markdown(report["content"])
 else:
     with st.container(key=f"research-report-library-{asset_key}"):
-        st.markdown(report["content"])
+        # 兼容早期被模型用整篇代码围栏包住的报告；资料库仍展示完整来源区。
+        st.markdown(normalize_markdown_document(str(report["content"])))

@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .errors import SearchUnavailableError
+from .search_routing import QueryRoute, SearchProviderRegistry, classify_query
 from ..domain.models import ResourceType, RiskLevel, SearchContentType, SearchResponse, SearchResult
+from ..domain.ranking import SourceRanker
 
 
 class SearchService:
@@ -51,6 +54,10 @@ class SearchService:
         self.content_type = (
             content_type.value if isinstance(content_type, SearchContentType) else str(content_type).strip()
         ) or SearchContentType.GENERAL.value
+        self.registry = SearchProviderRegistry([*self.providers, *self.academic_providers])
+        self.ranker = SourceRanker(per_domain_limit=2)
+        self._provider_failures: dict[str, str] = {}
+        self._failure_counts: dict[str, int] = {}
 
     def search(self, query: str, limit: int = 12, locale: str = "zh-CN", region: str = "CN") -> SearchResponse:
         """改写查询、并发检索、去重分类，并返回可直接展示的结果。"""
@@ -71,6 +78,8 @@ class SearchService:
             self.content_type,
             "" if self.content_type == SearchContentType.GENERAL.value else self.content_type,
         )
+        if not content_hint and any(marker in normalized.casefold() for marker in ("官网", "官方", "政策", "公告", "通知", "法规")):
+            content_hint = "官方"
         scoped_query = f"{normalized} {content_hint}".strip()
         queries = [scoped_query]
         if is_media:
@@ -83,19 +92,33 @@ class SearchService:
             elif self._contains(normalized, self.technical_markers):
                 queries.append(f"{scoped_query} official documentation GitHub")
         queries = list(dict.fromkeys(queries))
-        providers = [*self.providers, *(self.academic_providers if is_academic else [])]
+        route = classify_query(normalized, self.content_type)
+        providers = self.registry.select(normalized, self.content_type)
         for provider in providers:
             configure = getattr(provider, "set_context", None)
             if callable(configure):
-                configure(locale=locale, region=region)
+                configure(
+                    locale=locale,
+                    region=region,
+                    topic="news" if route == QueryRoute.CURRENT else "",
+                )
         raw = self._search_all(providers, queries, max(3, min(8, limit)))
+        retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for item in raw:
+            item.retrieved_at = item.retrieved_at or retrieved_at
+            item.freshness_status = (
+                "dated" if item.published_at else "unknown"
+            ) if route == QueryRoute.CURRENT else "not_required"
         items = self._clean_and_classify(raw, is_media)
+        items = self.ranker.rank(items, normalized, queries, limit=max(limit * 2, limit))
         items = self._deduplicate(items)[:limit]
         if not items:
             provider_labels = {
                 "brave": "Brave",
                 "duckduckgo": "DuckDuckGo",
                 "wikipedia": "Wikipedia",
+                "tavily": "Tavily",
+                "searxng": "SearXNG",
                 "openalex": "OpenAlex",
                 "crossref": "Crossref",
             }
@@ -109,17 +132,22 @@ class SearchService:
             )) or "当前搜索源"
             raise SearchUnavailableError(
                 f"没有取得可用的真实搜索结果。已尝试 {attempted}，但本次均未返回可用内容；"
-                "常见原因是网络超时、访问限制或搜索服务临时异常。请检查网络，或配置 Brave Search API "
+                "常见原因是网络超时、访问限制或搜索服务临时异常。请检查网络，或配置 Tavily/Brave/SearXNG "
                 "提升稳定性；在线模式不会使用 Mock 结果代替。"
             )
         warnings = []
         if self.mock_mode:
             warnings.append("当前是显式演示模式：Mock 结果只用于验证界面和流程，不代表真实来源。")
-        elif not any(item.provider == "brave" for item in items):
-            warnings.append("当前结果来自免费回退搜索源；配置 Brave Search API 可提升稳定性与覆盖率。")
+        if self._provider_failures:
+            warnings.append("部分搜索源已降级：" + "；".join(
+                f"{name}（{reason}）" for name, reason in self._provider_failures.items()
+            ))
+        if not any(item.provider.split("/", 1)[0] in {"brave", "tavily"} for item in items):
+            warnings.append("当前结果来自免费或自托管搜索源，稳定性和额度取决于对应服务。")
         return SearchResponse(
             normalized, self._answer(normalized, items, is_media), items, queries, warnings,
             round(time.perf_counter() - started, 3),
+            provider_failures=dict(self._provider_failures),
         )
 
     @staticmethod
@@ -127,23 +155,49 @@ class SearchService:
         lowered = text.lower()
         return any(marker in lowered for marker in markers)
 
-    @staticmethod
-    def _search_all(providers, queries: list[str], limit: int) -> list[SearchResult]:
+    def _search_all(self, providers, queries: list[str], limit: int) -> list[SearchResult]:
         """并发执行搜索源与查询的笛卡尔积，并恢复稳定任务顺序。"""
 
         tasks = [(provider, query) for provider in providers for query in queries]
         if not tasks:
             return []
+        self._provider_failures = {}
         groups: dict[int, list[SearchResult]] = {}
         with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as executor:
-            futures = {executor.submit(provider.search, query, limit): index for index, (provider, query) in enumerate(tasks)}
+            futures = {
+                executor.submit(self._search_one, provider, query, limit): (index, provider)
+                for index, (provider, query) in enumerate(tasks)
+            }
             for future in as_completed(futures):
                 try:
-                    groups[futures[future]] = future.result()
-                except Exception:
-                    groups[futures[future]] = []
+                    index, _ = futures[future]
+                    groups[index] = future.result()
+                except Exception as exc:
+                    index, provider = futures[future]
+                    groups[index] = []
+                    self._provider_failures[provider.name] = type(exc).__name__
         # future 的完成顺序不稳定；按创建序号重组可让结果和快照可重复。
         return [item for index in sorted(groups) for item in groups[index]]
+
+    def _search_one(self, provider, query: str, limit: int) -> list[SearchResult]:
+        """单源有限重试；连续失败三次后本次服务实例内熔断。"""
+
+        name = str(getattr(provider, "name", "unknown"))
+        if self._failure_counts.get(name, 0) >= 3:
+            self._provider_failures[name] = "连续失败，已临时熔断"
+            return []
+        results: list[SearchResult] = []
+        for _ in range(2):
+            results = provider.search(query, limit)
+            if results or not getattr(provider, "last_error", ""):
+                break
+        if results:
+            self._failure_counts[name] = 0
+            return results
+        reason = str(getattr(provider, "last_error", "") or "未返回结果")
+        self._failure_counts[name] = self._failure_counts.get(name, 0) + 1
+        self._provider_failures[name] = reason
+        return []
 
     def _clean_and_classify(self, results: list[SearchResult], is_media: bool) -> list[SearchResult]:
         cleaned = []
@@ -178,7 +232,7 @@ class SearchService:
             ResourceType.WATCH.value: 0, ResourceType.OFFICIAL.value: 1,
             ResourceType.ACADEMIC.value: 1, ResourceType.COMMUNITY.value: 2, ResourceType.WEB.value: 3,
         }
-        return sorted(cleaned, key=lambda item: (priority.get(item.resource_type, 4), -item.rank_score, item.title))
+        return sorted(cleaned, key=lambda item: (-item.rank_score, priority.get(item.resource_type, 4), item.title))
 
     @staticmethod
     def _host_matches(host: str, choices: set[str]) -> bool:
@@ -210,8 +264,18 @@ def search_response_markdown(response: SearchResponse) -> str:
 
     lines = [f"# {response.query}", "", response.answer, "", "## 搜索结果", ""]
     for index, item in enumerate(response.items, 1):
-        metadata = " · ".join(part for part in (item.resource_type, item.risk_level, item.published_at) if part)
-        lines.extend([f"### {index}. [{item.title}]({item.url})", "", metadata, "", item.snippet or "无摘要", ""])
+        metadata = " · ".join(part for part in (
+            item.resource_type,
+            item.risk_level,
+            f"Provider: {item.provider}" if item.provider else "",
+            f"Published: {item.published_at}" if item.published_at else "Published: unknown",
+            f"Retrieved: {item.retrieved_at}" if item.retrieved_at else "Retrieved: unknown",
+            f"Freshness: {item.freshness_status}",
+        ) if part)
+        lines.extend([
+            f"### {index}. [{item.title}]({item.url})", "", metadata,
+            f"Query: {item.query or response.query}", "", item.snippet or "无摘要", "",
+        ])
     if response.warnings:
         lines.extend(["## 提示", "", *(f"- {warning}" for warning in response.warnings), ""])
     return "\n".join(lines).strip() + "\n"

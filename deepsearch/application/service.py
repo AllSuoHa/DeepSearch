@@ -11,10 +11,13 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 from ..domain.models import ResearchBrief, ResearchMetrics, ResearchPolicy, ResearchResult, RoundTrace, SearchResult, Source
+from .context import ContextResolver
 from .errors import ReportQualityError, SearchUnavailableError
+from .search_routing import QueryRoute, SearchProviderRegistry, classify_query
 from .ports import (
     Planner,
     Progress,
@@ -54,6 +57,7 @@ class ResearchService:
         self.policy = policy
         self.providers = providers
         self.academic_providers = academic_providers or []
+        self.registry = SearchProviderRegistry([*self.providers, *self.academic_providers])
         self.fallback = fallback
         self.fetcher = fetcher
         self.planner = planner
@@ -65,12 +69,16 @@ class ResearchService:
         self.reporter = reporter
         self.storage = storage
         self.quality_evaluator = quality_evaluator
+        self._provider_failures: dict[str, str] = {}
+        self._provider_failure_counts: dict[str, int] = {}
 
     def research(
         self,
         question: str,
         progress: Progress | None = None,
         brief: ResearchBrief | None = None,
+        *,
+        search_query: str = "",
     ) -> ResearchResult:
         """执行研究主流程，并返回报告、证据、轨迹、指标和质量评分。"""
 
@@ -82,6 +90,10 @@ class ResearchService:
         # 规划阶段必须先于任何网络请求，以便用户立即看到反馈。
         notify("plan", "正在分析问题并制定搜索策略…")
         plan = self.planner.plan(question, brief)
+        if search_query.strip() and search_query.strip() != question.strip():
+            # 报告仍回答用户当前问题；只有检索词使用去指代后的独立表达。
+            rewritten_plan = self.planner.plan(search_query.strip(), brief)
+            plan.queries = rewritten_plan.queries
         notify("plan", f"{plan.rationale} 子问题：{len(plan.subquestions)} 个")
         logger.info("规划完成 type=%s subquestions=%d", plan.question_type.value, len(plan.subquestions))
 
@@ -89,12 +101,14 @@ class ResearchService:
         known_urls: set[str] = set()
         stagnant_rounds = 0
         queries = plan.queries
-        academic_markers = {"研究", "学术", "论文", "期刊", "文献"}
-        active_providers = list(self.providers)
-        if academic_markers.intersection(plan.brief.information_types) or any(
-            marker in question.lower() for marker in ("论文", "期刊", "文献", "学术", "paper", "journal")
-        ):
-            active_providers.extend(self.academic_providers)
+        route = classify_query(search_query or question)
+        ranking_question = f"{question} {search_query}".strip()
+        active_providers = self.registry.select(search_query or question)
+        for provider in active_providers:
+            configure = getattr(provider, "set_context", None)
+            if callable(configure):
+                configure(topic="news" if route == QueryRoute.CURRENT else "")
+        self._provider_failures = {}
         stop_reason = "达到最大搜索轮次"
         completed_rounds = 0
         traces: list[RoundTrace] = []
@@ -106,6 +120,12 @@ class ResearchService:
             completed_rounds = round_number
             notify("search", f"正在执行第 {round_number} 轮搜索：{len(queries)} 个查询…")
             search_results = self._search_queries(queries, active_providers)
+            retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for item in search_results:
+                item.retrieved_at = item.retrieved_at or retrieved_at
+                item.freshness_status = (
+                    "dated" if item.published_at else "unknown"
+                ) if route == QueryRoute.CURRENT else "not_required"
             total_results += len(search_results)
             if self._used_search_fallback:
                 notify("search", "演示模式正在使用 Mock 数据；它不会被视为真实来源。")
@@ -127,13 +147,15 @@ class ResearchService:
                         existing.query = f"{existing.query}；{result.query}".strip("；")
             # 先去重，再按相关性、权威性和域名多样性挑选有限候选。
             slots = max(0, self.policy.max_sources - len(sources))
-            fresh_results = self.ranker.rank(candidates, question, plan.subquestions, slots)
+            fresh_results = self.ranker.rank(candidates, ranking_question, plan.subquestions, slots)
             known_urls.update(self._canonical_url(result.url) for result in fresh_results)
             notify("search", f"第 {round_number} 轮找到 {len(search_results)} 条结果，新增 {len(fresh_results)} 条")
             notify("fetch", f"正在并发抓取 {len(fresh_results)} 个网页正文…")
             new_sources = self._fetch_results(fresh_results)
             for source in new_sources:
-                self.ranker.score_source(source, question)
+                self.ranker.score_source(source, ranking_question)
+            relevant = getattr(self.ranker, "is_relevant_source", lambda source: True)
+            new_sources = [source for source in new_sources if relevant(source)]
             sources.extend(new_sources)
             stagnant_rounds = stagnant_rounds + 1 if not new_sources else 0
             for index, source in enumerate(sources, 1):
@@ -220,6 +242,7 @@ class ResearchService:
         return ResearchResult(
             question, report, path, sources, completed_rounds, plan, stop_reason, validation,
             traces, metrics, scorecard, self._direct_answer(report), review_summary,
+            dict(self._provider_failures),
         )
 
     def follow_up(self, previous: ResearchResult, question: str, progress: Progress | None = None) -> ResearchResult:
@@ -231,13 +254,18 @@ class ResearchService:
         follow_terms = self.planner.terms(question)
         overlap = len(known_terms & follow_terms)
         coverage = overlap / max(1, len(follow_terms))
-        freshness_markers = ("最新", "最近", "今天", "当前", "变化", "更新", "新闻", "公告", "数据", "来源")
+        freshness_markers = ("最新", "最近", "今天", "当前", "变化", "更新", "新闻", "公告", "数据")
         needs_fresh_evidence = any(marker in question.lower() for marker in freshness_markers)
+        direct_context_request = any(marker in question.lower() for marker in (
+            "为什么", "展开第一点", "展开第二点", "展开第三点", "上面的来源", "上述来源",
+        ))
         # 只有已有证据真正覆盖追问且不要求新时效时才复用；否则重新进入完整反馈循环。
         has_reusable_evidence = bool(previous.sources) and any(source.usable_text for source in previous.sources)
-        if has_reusable_evidence and not needs_fresh_evidence and coverage >= 0.6 and overlap >= min(2, max(1, len(follow_terms))):
+        if has_reusable_evidence and not needs_fresh_evidence and (
+            direct_context_request
+            or (coverage >= 0.6 and overlap >= min(2, max(1, len(follow_terms))))
+        ):
             notify("follow_up", "已有报告包含相关信息，正在基于原来源整理追问答案…")
-            combined = f"{previous.question}；追问：{question}"
             plan = self.planner.plan(question, previous.plan.brief)
             evidence, conflicts = self.verifier.organize(previous.sources)
             report = self.reporter.generate(plan, previous.sources, evidence, conflicts, previous.rounds, previous.trace)
@@ -250,18 +278,19 @@ class ResearchService:
                 validation = self.validator.validate(report, previous.sources, plan)
             if not validation.valid:
                 raise ReportQualityError("追问报告未通过质量门：" + "；".join(validation.issues))
-            path = self.storage.save(combined, report, plan.brief.report.output_format)
+            path = self.storage.save(question, report, plan.brief.report.output_format)
             scorecard = self.quality_evaluator.evaluate(plan, previous.sources, validation, previous.metrics, len(previous.trace))
             notify("saved", f"追问报告已保存：{path}")
             review_summary = tuple(getattr(self.reporter, "last_review_summary", ()))
             return ResearchResult(
-                combined, report, path, previous.sources, previous.rounds, plan,
+                question, report, path, previous.sources, previous.rounds, plan,
                 "复用已有研究上下文", validation, previous.trace, previous.metrics, scorecard,
-                self._direct_answer(report), review_summary,
+                self._direct_answer(report), review_summary, dict(previous.provider_failures),
             )
         reason = "追问要求最新或补充证据" if needs_fresh_evidence else f"已有证据仅覆盖追问关键词的 {coverage:.0%}"
         notify("follow_up", f"{reason}，自动追加搜索并重新评估…")
-        return self.research(f"{previous.question}；追问：{question}", progress, previous.plan.brief)
+        standalone = ContextResolver.standalone_query(previous.question, question)
+        return self.research(question, progress, previous.plan.brief, search_query=standalone)
 
     def _search_queries(self, queries: list[str], providers: list[SearchProvider] | None = None) -> list[SearchResult]:
         """并发执行“搜索源 × 查询”的笛卡尔任务集合。"""
@@ -282,7 +311,8 @@ class ResearchService:
                     except Exception as exc:
                         index, provider, query = futures[future]
                         result_groups[index] = []
-                        logger.warning("搜索提供器异常 provider=%s query=%s error=%s", provider.name, query, exc)
+                        self._provider_failures[provider.name] = type(exc).__name__
+                        logger.warning("搜索提供器异常 provider=%s error=%s", provider.name, type(exc).__name__)
         # 按任务创建顺序重组结果，避免线程完成顺序让报告随机漂移。
         results = [result for index in sorted(result_groups) for result in result_groups[index]]
         if not results and self.policy.mock_search and self.fallback is not None:
@@ -309,7 +339,20 @@ class ResearchService:
             cached = self.cache.get_search(provider.name, query, self.policy.results_per_query)
             if cached is not None:
                 return cached
-        results = provider.search(query, self.policy.results_per_query)
+        name = provider.name
+        if self._provider_failure_counts.get(name, 0) >= 3:
+            self._provider_failures[name] = "连续失败，已临时熔断"
+            return []
+        results: list[SearchResult] = []
+        for _ in range(2):
+            results = provider.search(query, self.policy.results_per_query)
+            if results or not getattr(provider, "last_error", ""):
+                break
+        if results:
+            self._provider_failure_counts[name] = 0
+        else:
+            self._provider_failure_counts[name] = self._provider_failure_counts.get(name, 0) + 1
+            self._provider_failures[name] = str(getattr(provider, "last_error", "") or "未返回结果")
         if provider.name != "mock" and results:
             self.cache.set_search(provider.name, query, self.policy.results_per_query, results)
         return results

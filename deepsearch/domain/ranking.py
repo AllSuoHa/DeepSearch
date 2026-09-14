@@ -24,14 +24,21 @@ class SourceRanker:
         self.per_domain_limit = max(1, per_domain_limit)
 
     def rank(self, results: list[SearchResult], question: str, subquestions: list[str], limit: int | None = None) -> list[SearchResult]:
-        """先计算综合分，再按域名配额选择候选来源。"""
+        """先剔除无关候选，再在相关结果中考虑权威性和域名配额。"""
 
         context = " ".join([question, *subquestions])
         for result in results:
-            relevance = self._similarity(context, f"{result.title} {result.snippet} {result.query}")
+            # provider 回填的 query 与用户问题天然相同，不能把它计入右侧，
+            # 否则标题和摘要完全无关的页面也会获得虚假的高相关性。
+            relevance = self._similarity(context, f"{result.title} {result.snippet}")
             quality = self._domain_quality(result.url)
             snippet_bonus = min(len(result.snippet) / 500, 0.1)
-            result.rank_score = round(0.7 * relevance + 0.25 * quality + snippet_bonus, 4)
+            authority_weight = min(1.0, relevance * 4.0)
+            result.rank_score = round(
+                0.82 * relevance + 0.12 * quality * authority_weight + snippet_bonus * authority_weight,
+                4,
+            )
+        results = [item for item in results if item.rank_score >= 0.035 or item.provider == "mock"]
         # URL 和标题是稳定的次级排序键，避免并发结果导致顺序不确定。
         ordered = sorted(results, key=lambda item: (-item.rank_score, item.url, item.title))
         selected, overflow = [], []
@@ -50,10 +57,24 @@ class SourceRanker:
     def score_source(self, source: Source, question: str) -> None:
         """正文抓取后重新评分，把内容完整度和抓取成功状态纳入质量。"""
 
-        source.relevance_score = round(self._similarity(question, f"{source.title} {source.query} {source.usable_text[:3000]}"), 4)
+        source.relevance_score = round(
+            self._similarity(question, f"{source.title} {source.snippet} {source.usable_text[:3000]}"),
+            4,
+        )
         content_bonus = min(math.log10(max(len(source.usable_text), 10)) / 10, 0.4)
         fetch_bonus = 0.15 if source.fetched and source.provider != "mock" else 0.0
-        source.quality_score = round(min(1.0, self._domain_quality(source.url) * 0.45 + content_bonus + fetch_bonus), 4)
+        # 权威性只能放大已经相关的来源，不能挽救与问题无关的官方页面。
+        authority = self._domain_quality(source.url) * 0.35 * min(1.0, source.relevance_score * 4.0)
+        source.quality_score = round(
+            min(1.0, authority + content_bonus * min(1.0, source.relevance_score * 5.0) + fetch_bonus),
+            4,
+        )
+
+    @staticmethod
+    def is_relevant_source(source: Source) -> bool:
+        """研究模型只接收达到最低语义相关性的来源。"""
+
+        return source.provider == "mock" or source.relevance_score >= 0.025
 
     @classmethod
     def _domain_quality(cls, url: str) -> float:

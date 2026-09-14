@@ -2,7 +2,7 @@
 
 > 当前版本：2.2.0 · Python 3.11+ · Streamlit 1.62+ · 本地优先
 
-DeepSearch 是一个面向个人使用的 AI 问答、搜索与研究助手。问答模式不联网，优先使用本地时间、计算工具和独立问答模型；搜索模式返回可直接访问的链接与资源卡片且不调用大模型；研究模式执行多轮检索、正文读取、证据整理、报告生成和质量校验。会话、搜索快照、报告、任务和配置默认都保存在本机。
+DeepSearch 是一个面向个人使用的 AI 问答、搜索与研究助手。问答模式不联网并优先调用配置的问答模型；搜索模式只返回可直接访问的链接与资源卡片，不调用大模型；研究模式执行多轮检索、正文读取、证据整理、研究模型写作和质量校验。会话、搜索快照、报告、任务和配置默认都保存在本机。
 
 ## 阅读导航
 
@@ -20,18 +20,18 @@ DeepSearch 是一个面向个人使用的 AI 问答、搜索与研究助手。�
 ## 核心能力
 
 - **三种显式模式**：问答、搜索、研究；用户直接决定本次任务的成本和交付形式。
-- **低成本快速回答**：本地时间和计算无需网络；独立轻量模型可选，绝不占用研究模型额度。
-- **链接优先搜索**：并发查询多个来源，去重、分类并标注访问风险，不强行生成论文式报告。
+- **明确的问答语义**：正常问题先交给 `chat_llm`；模型知道当前没有网页或实时工具，不得编造天气、新闻或价格。
+- **链接优先搜索**：通过 Provider Registry 按查询能力选择通用、时效、百科和学术来源，再做相关性过滤与风险标注。
 - **迭代式研究**：根据证据充分性决定停止或补搜，不固定机械执行若干轮。
 - **结论优先报告**：同一模型依次完成证据整理、初稿和独立审校，随后再过确定性质量门。
 - **真实失败语义**：在线失败不会混入 Mock；缺少模型时研究在检索前停止；模型错误会给出可操作提示。
 - **个人工作台**：本地会话、快捷输入、资料库、项目回收站、自动任务和 CustomerService 投递。
-- **安全持久化**：密钥不写入 `config.json`；会话不保存完整网页正文；不合格报告不落盘。
+- **安全持久化**：密钥不写入 `config.json`；误粘贴到问题、来源或 URL 参数中的常见凭据会在模型输入、会话和导出前脱敏；会话不保存完整网页正文；不合格报告不落盘。
 
 ```mermaid
 flowchart LR
     U[问题] --> R{工作模式}
-    R -->|问答| H[本地工具、独立模型或固定回复]
+    R -->|问答| H[chat_llm 或安全降级]
     R -->|搜索| S[查询改写与并发检索]
     S --> C[分类、风险过滤、结果卡片]
     R -->|研究| P[规划与多轮检索]
@@ -79,7 +79,7 @@ Mock 只验证流程，会在界面和报告中明确标识，不计入真实来
 - `pyproject.toml`：Python 版本与项目依赖定义；
 - `.streamlit/config.toml`：界面主题和非敏感运行配置。
 
-不要提交 `config.json`、`.env` 或 `.streamlit/secrets.toml`。它们已经列入 `.gitignore`；模型、Brave 和 CustomerService 凭据应在 Community Cloud 的应用设置中通过 **Secrets** 填写，键名与 `.streamlit/secrets.toml.example` 一致。
+不要提交 `config.json`、`.env` 或 `.streamlit/secrets.toml`。它们已经列入 `.gitignore`；模型、Tavily、Brave 和 CustomerService 凭据应在 Community Cloud 的应用设置中通过 **Secrets** 填写，键名与 `.streamlit/secrets.toml.example` 一致。
 
 部署参数：
 
@@ -90,7 +90,7 @@ Mock 只验证流程，会在界面和报告中明确标识，不计入真实来
 | Main file path | `streamlit_app.py` |
 | Python | `3.12`（Community Cloud 当前默认，满足本项目 `>=3.11`） |
 
-不配置任何密钥也可以使用普通搜索、本地时间、简单计算和基础问候；研究模式必须提供 `DEEPSEARCH_API_KEY`。如需模型驱动的快速回答，再单独配置 `DEEPSEARCH_CHAT_*`。Streamlit Cloud 不读取开发者电脑里的本地 Secrets，必须在应用的 **Settings → Secrets** 中重新配置。Brave 与 CustomerService 凭据均为可选。
+不配置任何密钥也可以使用 DuckDuckGo 等无 Key 搜索源，以及问答失败时的有限本地降级；研究模式必须提供 `DEEPSEARCH_API_KEY`。如需模型驱动的快速回答，可单独配置 `DEEPSEARCH_CHAT_*`，也可在设置页让问答模型复用研究模型配置。Streamlit Cloud 不读取开发者电脑里的本地 Secrets，必须在应用的 **Settings → Secrets** 中重新配置。Tavily、Brave 与 CustomerService 凭据均为可选。
 
 Community Cloud 的本地文件系统不保证持久保存。会话、报告、自动任务、缓存和页面内保存的设置可能在应用重启、重新部署或休眠恢复后丢失；需要长期保存时应接入外部持久化服务。自动任务也不会在应用休眠或无人访问时持续运行。
 
@@ -100,9 +100,13 @@ Community Cloud 的本地文件系统不保证持久保存。会话、报告、�
 
 | 模式 | 适合场景 | 处理方式 | 是否需要模型 |
 |---|---|---|---|
-| 问答 | 时间、计算、翻译、常识和日常交流 | 不联网；使用本地工具或独立问答模型，并始终在当前模式内回复 | 可选，推荐本地 Ollama |
+| 问答 | 翻译、常识、解释和日常交流 | 不联网；优先调用 `chat_llm`，模型不可用时才使用有限本地降级 | 可选，推荐本地 Ollama |
 | 搜索 | 找官网、文档、影视平台、网页或论文入口 | 查询补充、并发检索、去重、分类、风险过滤，输出结果卡片 | 否 |
 | 研究 | 比较、综述、方案评估、深度调研 | 多轮检索、正文读取、证据综合、三阶段写作、质量门和评分 | 在线模式需要 |
+
+“重新执行”“改用搜索重跑”和“改用研究重跑”都以 `fresh` 策略启动，只处理当前问题。普通输入使用 `conversation`；只有“为什么”“展开第二点”“上面的来源可靠吗”等明确指向上一研究的表达才解析为 `follow_up`。每次结果的“运行信息”都会显示用户选择、实际模式、实际模型、搜索源和上下文策略。
+
+这里的 Tool 是应用真正实现的能力（例如网页搜索和抓取）；Function Calling 只是模型请求 Tool 的通信协议，并不会凭空提供网络；Skill 是智能体工作说明，也不是数据源。DeepSearch 目前保留可审计的确定性研究编排，不会把未经审查的 GitHub Skill 当作生产搜索后端。
 
 CLI 的 `ask` 为兼容旧版默认使用研究模式，建议显式传入模式：
 
@@ -115,10 +119,12 @@ deepsearch ask "调研 Agent 架构并给出选型结论" --mode research
 
 ## 在线配置
 
-在线搜索默认尝试 Brave（已配置时）、DuckDuckGo 和 Wikipedia；学术请求还会加入 OpenAlex 与 Crossref。普通搜索不需要大模型密钥。在线研究使用 OpenAI Chat Completions 兼容接口：
+在线搜索由 Provider Registry 路由：通用/时效查询使用已启用的 Tavily、Brave、SearXNG 或 DuckDuckGo；定义和历史背景才会选择已启用的 Wikipedia；学术请求才会选择已启用的 OpenAlex 与 Crossref。所有来源都可在设置页启用、禁用并调整顺序。普通搜索不需要大模型密钥。在线研究使用 OpenAI Chat Completions 兼容接口：
 
 ```powershell
 $env:DEEPSEARCH_BRAVE_API_KEY = "your-brave-key"
+$env:DEEPSEARCH_TAVILY_API_KEY = "your-tavily-key"
+$env:DEEPSEARCH_SEARXNG_BASE_URL = "https://search.example.org"
 $env:DEEPSEARCH_API_KEY = "your-model-key"
 $env:DEEPSEARCH_BASE_URL = "https://api.openai.com/v1"
 $env:DEEPSEARCH_MODEL = "gpt-4o-mini"
@@ -140,6 +146,8 @@ deepsearch web
 |---|---|---|
 | `DEEPSEARCH_RUNTIME_MODE` | `online` 或 `mock` | 默认 `online` |
 | `DEEPSEARCH_BRAVE_API_KEY` | 启用 Brave Search | 可选 |
+| `DEEPSEARCH_TAVILY_API_KEY` | 启用 Tavily Search | 可选，额度以供应商为准 |
+| `DEEPSEARCH_SEARXNG_BASE_URL` | 自托管 SearXNG 根地址 | 可选，实例需启用 JSON 输出 |
 | `DEEPSEARCH_API_KEY` | 在线研究模型密钥 | 研究必需 |
 | `DEEPSEARCH_BASE_URL` | OpenAI 兼容接口根地址 | `https://api.openai.com/v1` |
 | `DEEPSEARCH_MODEL` | 服务端模型 ID | `gpt-4o-mini` |
@@ -153,7 +161,7 @@ deepsearch web
 | `DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY` | 联动身份凭据 | 启用联动时必需 |
 | `DEEPSEARCH_CUSTOMER_SERVICE_API_KEY` | 可选的 API Bearer 凭据 | 可选 |
 
-完整普通配置见 `config.example.json`。加载优先级为：内置默认值 → JSON → 环境变量/Streamlit Secrets → 调用参数。保存设置时所有密钥字段都会被清空。
+完整普通配置见 `config.example.json`。非敏感配置加载优先级为：内置默认值 → JSON → 环境变量/Streamlit Secrets → 调用参数；所有 API Key 只从环境变量或 Streamlit Secrets 读取，JSON 中的 Key 即使存在也会被忽略，保存设置时密钥字段始终为空。
 
 ## Web 工作台
 
@@ -165,7 +173,7 @@ deepsearch web
 4. 问答显示普通助手消息；搜索显示结果卡片；研究显示结论优先报告和折叠的证据、审校及质量信息。
 5. 每条历史搜索/研究回答都保留自己的来源链接；只有已落盘的搜索/研究资产才可下载或推送到 CustomerService。
 6. 已落盘的搜索快照和研究报告可按需下载为 Markdown、Word、PDF、TXT、JSON 或 HTML；资料库仍只保存原始资产，导出不会生成重复文件。
-7. 在资料库下载或推送选中资产，也可把资产移到项目回收站；恢复时不会覆盖同名文件，永久删除需要再次确认。
+7. 在资料库下载或推送选中资产，也可把资产移到项目回收站；回收站表格支持多选批量恢复和删除，恢复时不会覆盖同名文件，永久删除需要再次确认。
 8. 输入框中按 Enter 发送，Shift+Enter 或 Ctrl+Enter 换行；输入栏上方的悬浮按钮可平滑回到页面顶部或直接到达对话底部。
 
 删除资料库资产后，报告选择器会根据现有文件集合立即重建，不再保留已删除项；删除会话只删除聊天 JSON，不会连带删除报告或搜索快照。
@@ -247,7 +255,7 @@ flowchart TB
     end
 
     subgraph Infrastructure[基础设施层]
-        PROVIDERS[Brave / DDG / Wikipedia<br/>OpenAlex / Crossref / Mock]
+        PROVIDERS[Tavily / Brave / SearXNG / DDG<br/>Wikipedia / OpenAlex / Crossref / Mock]
         FETCH[WebFetcher<br/>HTML / PDF]
         LLM[OpenAICompatibleLLM]
         REPORT[MarkdownReporter]
@@ -351,7 +359,7 @@ DeepSearch/
 │  │     ├─ report_downloads.py          # 按需多格式导出菜单
 │  │     └─ scroll_controls.py           # CCv2 输入与滚动控件
 │  └─ scheduling/topics.py               # 自动任务模型、管理器和调度器
-├─ tests/                                # 128 项离线优先测试
+├─ tests/                                # 145 项离线优先测试
 ├─ docs/                                 # 用户、架构与维护文档
 ├─ config.example.json                   # 完整普通配置模板
 └─ pyproject.toml                        # 包、依赖和命令入口
@@ -397,7 +405,9 @@ IntentClassifier（仅 AUTO）
 
 ### 问答执行链路
 
-`ChatService` 接收用户明确选择的问答请求。时间和计算优先使用本地确定性工具；配置完整的 `DEEPSEARCH_CHAT_*` 时，其余请求使用独立问答模型。本机回环地址会自动补兼容协议所需的占位 Key，远端服务仍必须配置真实 Key。问答模式不发起网页搜索，也不进行二次意图路由或输出切换模式建议；对无法联网核实的内容，模型应说明知识时效或不确定性并在当前能力范围内回答。未配置、超时、限流或返回异常时绝不调用搜索或研究模型，并会区分“未配置”和“已配置但连接失败”。发送给模型的上下文最多保留最近 6 条短消息，并在发送前排除搜索/研究正文和常见密钥形态。
+`ChatService` 接收用户明确选择的问答请求，并先调用有效的 `chat_llm`；“今天”“天气”“新闻”“价格”等词不会再触发硬编码拦截。本机回环地址会自动补协议占位 Key，远端服务仍必须配置真实 Key。系统提示会明确告知模型当前没有网页、实时搜索或外部工具，禁止伪造实时事实；必要时可以建议配置搜索源或让用户点击搜索/研究重跑。只有模型未配置或调用失败时，本地时间、简单计算和安全说明才作为降级下限。发送给模型的上下文最多保留最近 6 条短消息，并在发送前排除搜索/研究正文和常见密钥形态。
+
+上下文由 DeepSearch 会话层显式管理，不依赖模型服务端的永久记忆。`fresh` 不读取旧研究，`conversation` 只在问题明确指向上一结果时升级为 `follow_up`；相同问题、时效问题和无关新问题都重新检索当前问题。恢复磁盘会话时只加载当前会话的报告和轻量来源元数据，缺少原始网页正文的追问会改写为独立查询后重新检索。
 
 问答只写入当前会话，不生成 `data/artifacts/` 快照、研究报告或资料库项目，因此页面不显示下载、证据详情或 CustomerService 推送；结果下方只提供复用原问题的搜索/研究重跑入口。
 
@@ -427,7 +437,7 @@ sequenceDiagram
     F->>F: 保存 data/artifacts/*.md
 ```
 
-搜索模式只处理搜索摘要，不抓取全文，也不调用大模型。影视查询优先显示正规播放平台；学术查询追加 OpenAlex 与 Crossref。全部在线来源失败时抛出 `SearchUnavailableError`，绝不自动生成 Mock 链接。
+搜索模式只处理搜索摘要，不抓取全文，也不调用大模型。影视查询优先显示正规播放平台；学术查询按配置路由到 OpenAlex 与 Crossref。全部在线来源失败时抛出 `SearchUnavailableError`，绝不自动生成 Mock 链接。
 
 ### 研究模式执行链路
 
@@ -515,9 +525,10 @@ Web 把阻塞研究放入有限后台线程池，页面线程按整秒更新默�
 ```text
 Settings
   ├─ build_search_providers()
-  │    ├─ BraveSearch（有 Key 才启用）
-  │    ├─ DuckDuckGoSearch
-  │    └─ WikipediaSearch
+  │    ├─ TavilySearch / BraveSearch（有 Key 才启用）
+  │    ├─ SearXNGSearch（配置自托管地址才启用）
+  │    ├─ DuckDuckGoSearch（无 Key 备用）
+  │    └─ WikipediaSearch（只用于背景/定义）
   ├─ 学术源：OpenAlexSearch + CrossrefSearch
   ├─ WebFetcher
   ├─ ResearchCache
@@ -552,7 +563,7 @@ flowchart LR
     ARTIFACTS --> DELIVERY
 ```
 
-普通配置的基础优先级是默认值 → JSON → 环境变量 → 调用覆盖；Web 还会从 Streamlit Secrets 安全注入模型、Brave 和联动凭据。`save_settings()` 会强制清空密钥字段。
+普通配置的基础优先级是默认值 → JSON → 环境变量 → 调用覆盖；Web 还会从 Streamlit Secrets 安全注入模型、搜索和联动凭据。API Key 不从 JSON 读取，`save_settings()` 也会强制清空所有密钥字段。
 
 会话只保存消息、模式、轻量来源元数据、资产路径和投递状态，不保存完整网页正文。资料库删除会把资产移到 `data/trash/`，清除会话中的失效路径；恢复和永久删除都会重新校验允许目录和元数据。
 

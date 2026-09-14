@@ -1,7 +1,12 @@
 import unittest
 
 from deepsearch.domain.models import SearchPlan, QuestionType, Source
-from deepsearch.application.verification import AnswerValidator, canonicalize_source_section
+from deepsearch.application.verification import (
+    AnswerValidator,
+    canonicalize_source_section,
+    report_body_for_conversation,
+    report_body_without_source_section,
+)
 
 
 class ValidationTests(unittest.TestCase):
@@ -27,6 +32,34 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("[Example \\[Guide\\]](<https://www.example.org/research/guide>)", report)
         self.assertIn("`example.org` · 已读取正文 · 质量 86/100", report)
         self.assertNotIn("Example: https://", report)
+
+    def test_fenced_markdown_is_unwrapped_and_sources_can_be_hidden_from_body_view(self):
+        sources = [
+            Source(
+                "Weather service",
+                "https://weather.example.org/hangzhou",
+                "forecast",
+                source_id=1,
+            )
+        ]
+        fenced = (
+            "```markdown\n"
+            "# 杭州天气\n\n## 结论\n今天多云 [1]。\n\n"
+            "## 参考来源\n- [1] https://untrusted.example/source\n"
+            "```"
+        )
+
+        complete = canonicalize_source_section(fenced, sources)
+        body = report_body_without_source_section(complete)
+        conversation_body = report_body_for_conversation(complete)
+
+        self.assertTrue(complete.startswith("# 杭州天气"))
+        self.assertNotIn("```", complete)
+        self.assertEqual(complete.count("## 参考来源"), 1)
+        self.assertIn("weather.example.org", complete)
+        self.assertEqual(body, "# 杭州天气\n\n## 结论\n今天多云 [1]。")
+        self.assertEqual(conversation_body, "今天多云 [1]。")
+        self.assertNotIn("参考来源", body)
 
     def test_simple_fact_does_not_require_analysis_section(self):
         plan = SearchPlan("release date", QuestionType.FACT, ["release date"], ["release date"])

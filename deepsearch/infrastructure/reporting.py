@@ -20,6 +20,7 @@ from ..application.prompts import (
 )
 from ..application.verification import canonicalize_source_section, source_table
 from ..domain.models import Confidence, EvidenceGroup, QuestionType, RoundTrace, SearchPlan, Source
+from ..security import redact_sensitive_text
 
 
 class MarkdownReporter:
@@ -48,10 +49,15 @@ class MarkdownReporter:
         self.last_review_summary = ()
         if self.llm is not None:
             # 每个来源最多注入 4000 字符，避免单页吞噬全部模型上下文。
-            source_context = "\n\n".join(
-                f"[{source.source_id}] {source.title}\nURL: {source.url}\n{source.usable_text[:4000]}"
+            source_context = redact_sensitive_text("\n\n".join(
+                f"[{source.source_id}] {source.title}\n"
+                f"Provider: {source.provider} | Query: {source.query}\n"
+                f"URL: {source.url}\n"
+                f"Published/updated: {source.published_at or 'unknown'} | "
+                f"Retrieved: {source.retrieved_at or 'unknown'} | Freshness: {source.freshness_status}\n"
+                f"{source.usable_text[:4000]}"
                 for source in sources
-            )
+            ))
             specification = plan.brief.report
             stage = "准备模型输入"
             try:
@@ -59,12 +65,13 @@ class MarkdownReporter:
                 self._progress("evidence_map", "正在把来源整理为结论、引用、冲突与证据缺口…")
                 evidence_raw = self._generate_json(
                     EVIDENCE_SYSTEM,
-                    EVIDENCE_USER.format(
+                    redact_sensitive_text(EVIDENCE_USER.format(
                         question=plan.question,
+                        question_type=plan.question_type.value,
                         objective=plan.brief.objective,
                         subquestions="；".join(plan.subquestions),
                         sources=source_context,
-                    ),
+                    )),
                 )
                 evidence_map = self._parse_json(evidence_raw, "证据整理")
                 evidence_text = json.dumps(evidence_map, ensure_ascii=False, indent=2)
@@ -72,8 +79,9 @@ class MarkdownReporter:
                 self._progress("draft", "正在按结论优先的结构生成初稿…")
                 draft = self.llm.generate(
                     DRAFT_SYSTEM,
-                    DRAFT_USER.format(
+                    redact_sensitive_text(DRAFT_USER.format(
                         question=plan.question,
+                        question_type=plan.question_type.value,
                         objective=plan.brief.objective,
                         domain=plan.brief.domain,
                         information_types="、".join(plan.brief.information_types),
@@ -85,18 +93,18 @@ class MarkdownReporter:
                         custom_instructions=specification.custom_instructions or "无",
                         evidence_map=evidence_text,
                         sources=source_context,
-                    ),
+                    )),
                 )
                 stage = "独立审校"
                 self._progress("review", "正在独立检查直接性、重复、引用和排版并重写…")
                 reviewed_raw = self._generate_json(
                     REVIEW_SYSTEM,
-                    REVIEW_USER.format(
+                    redact_sensitive_text(REVIEW_USER.format(
                         question=plan.question,
                         evidence_map=evidence_text,
                         sources=source_context,
                         draft=draft,
-                    ),
+                    )),
                 )
                 reviewed = self._parse_json(reviewed_raw, "独立审校")
                 body = str(reviewed.get("final_report", "")).strip()
@@ -109,7 +117,7 @@ class MarkdownReporter:
             except ReportQualityError:
                 raise
             except Exception as exc:
-                detail = str(exc).strip() or type(exc).__name__
+                detail = redact_sensitive_text(str(exc).strip()) or type(exc).__name__
                 raise ReportQualityError(f"三阶段报告生成失败（{stage}）：{detail}") from exc
         return self._deterministic_report(plan, sources, evidence, conflicts, rounds, trace)
 
@@ -124,12 +132,12 @@ class MarkdownReporter:
         )
         repaired = self.llm.generate(
             REPAIR_SYSTEM,
-            REPAIR_USER.format(
+            redact_sensitive_text(REPAIR_USER.format(
                 question=plan.question,
                 issues="；".join(issues),
                 sources=source_context,
                 report=report,
-            ),
+            )),
         ).strip()
         if not repaired:
             raise ReportQualityError("模型没有返回修订后的报告")

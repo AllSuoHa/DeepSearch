@@ -7,6 +7,16 @@ import streamlit as st
 from deepsearch.domain.models import SearchContentType
 from deepsearch.infrastructure.cache import ResearchCache
 from deepsearch.infrastructure.config import save_settings
+from deepsearch.infrastructure.llm import OpenAICompatibleLLM
+from deepsearch.infrastructure.search import (
+    BraveSearch,
+    CrossrefSearch,
+    DuckDuckGoSearch,
+    OpenAlexSearch,
+    SearXNGSearch,
+    TavilySearch,
+    WikipediaSearch,
+)
 from deepsearch.presentation.web.information_types import (
     render_information_type_editor,
     request_information_type_editor,
@@ -89,6 +99,36 @@ with search_tab:
             "也不影响模型请求。数值较小会更快跳过故障来源；数值较大更适合响应较慢的网站。"
         ),
     )
+    provider_labels = {
+        "tavily": "Tavily",
+        "brave": "Brave",
+        "searxng": "SearXNG",
+        "duckduckgo": "DuckDuckGo",
+        "wikipedia": "Wikipedia",
+        "openalex": "OpenAlex",
+        "crossref": "Crossref",
+    }
+    configured_order = [
+        name for name in settings.search_provider_order
+        if name in provider_labels and name not in settings.disabled_search_providers
+    ]
+    enabled_provider_labels = st.multiselect(
+        "启用的搜索源",
+        list(provider_labels.values()),
+        default=[provider_labels[name] for name in configured_order],
+        help="Wikipedia 只参与定义、历史和背景类查询；OpenAlex 与 Crossref 只参与学术查询。",
+    )
+    provider_order_text = st.text_input(
+        "搜索源顺序（用逗号分隔）",
+        value=", ".join(provider_labels[name] for name in configured_order),
+        help="从左到右为优先级；只会采用上方已启用且名称有效的来源。",
+    )
+    searxng_base_url = st.text_input(
+        "SearXNG Base URL",
+        value=settings.searxng_base_url,
+        placeholder="https://search.example.org",
+        help="仅保存自托管实例地址，不保存凭据；实例必须启用 JSON 输出。",
+    )
     saved = st.button("保存搜索设置", type="primary", icon=":material/save:")
     if saved:
         settings.runtime_mode = "mock" if runtime_label == "演示" else "online"
@@ -111,23 +151,84 @@ with search_tab:
         settings.max_rounds = int(max_rounds)
         settings.max_sources = int(max_sources)
         settings.request_timeout = float(request_timeout)
+        reverse_labels = {label: name for name, label in provider_labels.items()}
+        enabled_names = {
+            reverse_labels[label] for label in enabled_provider_labels if label in reverse_labels
+        }
+        requested_labels = [
+            value.strip() for value in provider_order_text.replace("，", ",").split(",")
+        ]
+        requested_names = [
+            reverse_labels[label] for label in requested_labels
+            if label in reverse_labels and reverse_labels[label] in enabled_names
+        ]
+        selected_names = tuple(dict.fromkeys([
+            *requested_names,
+            *(name for name in provider_labels if name in enabled_names),
+        ]))
+        settings.search_provider_order = selected_names or ("duckduckgo",)
+        settings.disabled_search_providers = tuple(
+            name for name in provider_labels if name not in settings.search_provider_order
+        )
+        settings.searxng_base_url = searxng_base_url.strip().rstrip("/")
+        if settings.searxng_base_url:
+            try:
+                SearXNGSearch(settings.searxng_base_url, settings.request_timeout)
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
         save_settings(settings)
         st.toast("搜索设置已保存。", icon=":material/check_circle:")
         st.rerun()
 
+    def provider_for_test(name: str):
+        factories = {
+            "tavily": lambda: TavilySearch(settings.tavily_api_key, settings.request_timeout),
+            "brave": lambda: BraveSearch(settings.brave_api_key, settings.request_timeout),
+            "searxng": lambda: SearXNGSearch(settings.searxng_base_url, settings.request_timeout),
+            "duckduckgo": lambda: DuckDuckGoSearch(settings.request_timeout),
+            "wikipedia": lambda: WikipediaSearch(settings.request_timeout),
+            "openalex": lambda: OpenAlexSearch(settings.request_timeout),
+            "crossref": lambda: CrossrefSearch(settings.request_timeout),
+        }
+        return factories[name]()
+
     with st.container(border=True):
         st.markdown("**搜索源状态**")
-        with st.container(horizontal=True):
-            st.badge(
-                "Brave 主搜索 · 已配置" if settings.brave_api_key else "Brave 主搜索 · 未配置",
-                color="green" if settings.brave_api_key else "gray",
-            )
-            st.badge("DuckDuckGo · 免费备用", color="blue")
-            st.badge("Wikipedia · 百科备用", color="blue")
-            st.badge("OpenAlex / Crossref · 学术检索", color="violet")
+        provider_test_state = st.session_state.setdefault("provider-test-state", {})
+        status_rows = (
+            ("tavily", "Tavily", bool(settings.tavily_api_key), "可选正式 API（有免费额度）"),
+            ("brave", "Brave", bool(settings.brave_api_key), "可选正式 API（按套餐计费）"),
+            ("searxng", "SearXNG", bool(settings.searxng_base_url), "自托管接口"),
+            ("duckduckgo", "DuckDuckGo", True, "无 Key、不稳定备用"),
+            ("wikipedia", "Wikipedia", True, "仅百科背景"),
+            ("openalex", "OpenAlex", True, "学术元数据"),
+            ("crossref", "Crossref", True, "学术 DOI 元数据"),
+        )
+        for provider_name, label, configured, note in status_rows:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                tested = provider_test_state.get(provider_name, "")
+                state_label = tested or ("待测试" if configured else "未配置")
+                st.badge(
+                    f"{label} · {state_label}",
+                    color="green" if tested == "可用" else "red" if tested in {"连接失败", "限流"} else "gray",
+                )
+                st.caption(note)
+                if st.button(
+                    f"测试 {label}",
+                    key=f"test-provider-{provider_name}",
+                    disabled=not configured,
+                    icon=":material/network_check:",
+                ):
+                    provider = provider_for_test(provider_name)
+                    results = provider.search("DeepSearch", 1)
+                    status = str(getattr(provider, "last_status", ""))
+                    provider_test_state[provider_name] = (
+                        "可用" if results else "限流" if status == "rate_limited" else "连接失败"
+                    )
+                    st.rerun()
         st.markdown(
-            "这里显示的是**检索后端**，不是大模型。Brave 是独立网页搜索 API；配置后作为主搜索源，"
-            "未配置或单个来源失败时，系统会继续尝试免费的备用来源。学术问题还会加入 OpenAlex 和 Crossref。"
+            "这里显示的是**检索后端**，不是大模型。系统按查询能力选择来源；单个来源失败会有限重试并继续其他来源。"
         )
         with st.expander("如何配置 Brave Search？", icon=":material/help:"):
             st.markdown(
@@ -142,6 +243,16 @@ with search_tab:
                 icon=":material/open_in_new:",
             )
             st.caption("密钥只放在本地 Secrets 或环境变量中，不要提交到 GitHub。")
+        with st.expander("Tavily 与 SearXNG 配置", icon=":material/help:"):
+            st.code(
+                'DEEPSEARCH_TAVILY_API_KEY = "your-tavily-key"\n'
+                'DEEPSEARCH_SEARXNG_BASE_URL = "https://search.example.org"',
+                language="toml",
+            )
+            st.caption(
+                "Tavily Key 仅从环境变量或 Secrets 读取；SearXNG 地址可保存到普通配置。"
+                "公共 SearXNG 实例可能禁用 JSON 接口，生产环境建议使用受控自托管实例。"
+            )
 
 with model_tab:
     st.info(
@@ -150,10 +261,14 @@ with model_tab:
     )
     st.subheader("三阶段研究模型")
     with st.container(border=True):
-        st.badge("模型可用" if not settings.mock_llm else "尚未配置", color="green" if not settings.mock_llm else "orange")
-        st.caption(f"当前模型：{settings.llm.model} · {settings.llm.base_url}")
+        research_configured = bool(settings.llm.base_url and settings.llm.model and settings.llm.api_key)
+        st.badge("已配置 · 待连接测试" if research_configured else "尚未配置", color="green" if research_configured else "orange")
+        st.caption(f"当前 Base URL：{settings.llm.base_url or '未设置'}")
+        st.caption(f"当前模型：{settings.llm.model or '未设置'}")
         st.markdown("研究模式会依次执行证据整理、初稿生成和独立审校重写。没有模型时研究会明确停止，搜索仍可使用。")
     with st.form("model-settings"):
+        research_base_url = st.text_input("研究模型 Base URL", value=settings.llm.base_url)
+        research_model_name = st.text_input("研究模型名称", value=settings.llm.model)
         model_timeout = st.number_input(
             "模型单次请求超时（秒）",
             min_value=30.0,
@@ -164,6 +279,8 @@ with model_tab:
         )
         saved_model = st.form_submit_button("保存模型设置", type="primary", icon=":material/save:")
     if saved_model:
+        settings.llm.base_url = research_base_url.strip().rstrip("/")
+        settings.llm.model = research_model_name.strip()
         settings.llm.request_timeout = float(model_timeout)
         save_settings(settings)
         st.toast("模型设置已保存。", icon=":material/check_circle:")
@@ -175,6 +292,16 @@ with model_tab:
         language="toml",
     )
     st.caption("可放入环境变量或 `.streamlit/secrets.toml`，保存普通设置时不会落盘。")
+    if st.button(
+        "测试研究模型连接",
+        icon=":material/network_check:",
+        disabled=not research_configured,
+    ):
+        try:
+            OpenAICompatibleLLM(settings.llm).generate("只回复 OK。", "连接测试")
+            st.success("研究模型连接可用。")
+        except Exception as exc:
+            st.error(f"研究模型连接失败：{type(exc).__name__}")
 
     st.space("small")
     st.subheader("快速回答模型")
@@ -188,23 +315,31 @@ with model_tab:
             st.badge("远端模型缺少 API Key", color="orange")
         else:
             st.badge("未配置 · 使用基础回复", color="orange")
-        st.caption(f"当前 Base URL：{settings.chat_llm.base_url or '未设置'}")
-        st.caption(f"当前模型：{settings.chat_llm.model or '未设置'}")
-        st.caption(f"请求超时：{settings.chat_llm.request_timeout:g} 秒")
+        active_chat = settings.effective_chat_llm
+        st.caption(f"当前 Base URL：{active_chat.base_url or '未设置'}")
+        st.caption(f"当前模型：{active_chat.model or '未设置'}")
+        st.caption(f"请求超时：{active_chat.request_timeout:g} 秒")
         st.markdown(
-            "快速回答模型与研究模型相互独立。未配置、超时或额度不足时，只处理本地时间、"
-            "简单计算、问候和功能介绍，不会改用搜索或研究模型。"
+            "问答模式只调用这里的模型，不会自动搜索。模型不可用时才降级到有限的本地时间、"
+            "简单计算或安全提示，也绝不会改用研究模型。"
         )
     with st.form("chat-model-settings"):
+        same_model = st.toggle(
+            "问答模型与研究模型使用相同配置",
+            value=settings.chat_uses_research_model,
+            help="启用后问答仍是独立模式，但连接地址、模型名称和密钥与研究模型相同。",
+        )
         chat_base_url = st.text_input(
             "快速回答模型 Base URL",
             value=settings.chat_llm.base_url,
             placeholder="OpenAI Chat Completions 兼容 API 地址",
+            disabled=same_model,
         )
         chat_model_name = st.text_input(
             "快速回答模型名称",
             value=settings.chat_llm.model,
             placeholder="由所选服务商提供",
+            disabled=same_model,
         )
         chat_timeout = st.number_input(
             "快速回答请求超时（秒）",
@@ -212,11 +347,13 @@ with model_tab:
             max_value=180.0,
             value=float(settings.chat_llm.request_timeout),
             step=5.0,
+            disabled=same_model,
         )
         saved_chat_model = st.form_submit_button(
             "保存快速回答模型设置", type="primary", icon=":material/save:",
         )
     if saved_chat_model:
+        settings.chat_uses_research_model = bool(same_model)
         settings.chat_llm.base_url = chat_base_url.strip().rstrip("/")
         settings.chat_llm.model = chat_model_name.strip()
         settings.chat_llm.request_timeout = float(chat_timeout)
@@ -226,6 +363,16 @@ with model_tab:
         else:
             message = "快速回答模型设置已保存；远端 API Key 仍需通过 Secrets 或环境变量配置。"
         st.toast(message, icon=":material/check_circle:")
+    if st.button(
+        "测试问答模型连接",
+        icon=":material/network_check:",
+        disabled=not chat_configured,
+    ):
+        try:
+            OpenAICompatibleLLM(settings.effective_chat_llm).generate("只回复 OK。", "连接测试")
+            st.success("问答模型连接可用。")
+        except Exception as exc:
+            st.error(f"问答模型连接失败：{type(exc).__name__}")
     st.code(
         'DEEPSEARCH_CHAT_API_KEY = ""\n'
         'DEEPSEARCH_CHAT_BASE_URL = ""\n'
@@ -305,8 +452,8 @@ with integration_tab:
             f"当前 API 根地址：`{settings.customer_service.base_url}`。这里应填写 API 端口（通常为 8000），不是 Streamlit 页面端口。"
         )
     st.code(
-        'DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "integration-key"\n'
-        'DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "optional-api-key"',
+        'DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY = "your-customer-service-integration-key"\n'
+        'DEEPSEARCH_CUSTOMER_SERVICE_API_KEY = "your-optional-customer-service-api-key"',
         language="toml",
     )
     st.caption("修改 `.streamlit/secrets.toml` 后需要重启 DeepSearch，普通设置保存不会写入或覆盖密钥。")

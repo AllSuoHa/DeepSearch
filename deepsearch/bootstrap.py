@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .application.chat_service import ChatService
+from .application.context import ContextResolver
 from .application.errors import ResearchModelRequiredError
 from .application.evaluation import ResearchQualityEvaluator
 from .application.intent import IntentClassifier
@@ -17,7 +18,10 @@ from .application.planner import ResearchPlanner
 from .application.search_service import SearchService
 from .application.service import ResearchService
 from .application.verification import AnswerValidator, CrossVerifier
-from .domain.models import AgentRequest, AgentRunResult, ResearchBrief, ResearchPolicy, ResearchResult, WorkMode
+from .domain.models import (
+    AgentRequest, AgentRunResult, ContextPolicy, ResearchBrief, ResearchPolicy,
+    ResearchResult, RunAudit, WorkMode,
+)
 from .domain.ranking import SourceRanker
 from .infrastructure.cache import ResearchCache
 from .infrastructure.config import Settings
@@ -26,7 +30,7 @@ from .infrastructure.llm import OpenAICompatibleLLM
 from .infrastructure.reporting import MarkdownReporter
 from .infrastructure.search import (
     BraveSearch, CrossrefSearch, DuckDuckGoSearch, MockSearch, OpenAlexSearch,
-    SearchProvider, WikipediaSearch,
+    SearchProvider, SearXNGSearch, TavilySearch, WikipediaSearch,
 )
 from .infrastructure.storage import FileReportStorage, ReportStorage
 
@@ -73,9 +77,7 @@ def build_research_service(
         reporter=MarkdownReporter(llm),
         storage=storage or FileReportStorage(settings.reports_dir),
         quality_evaluator=ResearchQualityEvaluator(),
-        academic_providers=[] if settings.mock_search else [
-            OpenAlexSearch(settings.request_timeout), CrossrefSearch(settings.request_timeout),
-        ],
+        academic_providers=[],
     )
 
 
@@ -86,17 +88,27 @@ def build_search_providers(settings: Settings) -> list[SearchProvider]:
         return [MockSearch()]
     available = {
         "brave": lambda: BraveSearch(settings.brave_api_key, settings.request_timeout),
+        "tavily": lambda: TavilySearch(settings.tavily_api_key, settings.request_timeout),
+        "searxng": lambda: SearXNGSearch(settings.searxng_base_url, settings.request_timeout),
         "duckduckgo": lambda: DuckDuckGoSearch(settings.request_timeout),
         "wikipedia": lambda: WikipediaSearch(settings.request_timeout),
+        "openalex": lambda: OpenAlexSearch(settings.request_timeout),
+        "crossref": lambda: CrossrefSearch(settings.request_timeout),
     }
     providers = []
     for name in settings.search_provider_order:
+        if name in settings.disabled_search_providers:
+            continue
         if name == "brave" and not settings.brave_api_key:
+            continue
+        if name == "tavily" and not settings.tavily_api_key:
+            continue
+        if name == "searxng" and not settings.searxng_base_url:
             continue
         factory = available.get(name)
         if factory is not None:
             providers.append(factory())
-    return providers or [DuckDuckGoSearch(settings.request_timeout), WikipediaSearch(settings.request_timeout)]
+    return providers
 
 
 class DeepSearchAgent:
@@ -112,15 +124,19 @@ class DeepSearchAgent:
         providers = search_providers or build_search_providers(settings)
         self._search_service = SearchService(
             providers,
-            [] if settings.mock_search else [OpenAlexSearch(settings.request_timeout), CrossrefSearch(settings.request_timeout)],
+            [],
             mock_mode=settings.mock_search,
             content_type=settings.search_content_type,
         )
-        # 快速回答模型使用独立配置实例；未配置时由 ChatService 本地降级，
-        # 绝不会复用研究模型或消耗研究模型额度。
+        # 问答始终只经 ChatService 调用“有效问答配置”；只有用户显式打开
+        # 共享开关时，该连接才复用研究模型参数，模式仍不会进入研究流程。
         chat_model = OpenAICompatibleLLM(settings.effective_chat_llm) if settings.chat_model_available else None
-        self._chat_service = ChatService(chat_model)
+        self._chat_service = ChatService(
+            chat_model,
+            model_name=settings.effective_chat_llm.model if chat_model is not None else "",
+        )
         self._classifier = IntentClassifier()
+        self._context = ContextResolver()
 
     def run(self, request: AgentRequest, progress=None) -> AgentRunResult:
         """统一执行问答、搜索或研究；AUTO 仅在兼容调用中做路由。"""
@@ -142,15 +158,37 @@ class DeepSearchAgent:
                 locale=request.locale,
                 region=request.region,
             )
-            return AgentRunResult(requested, resolved, chat=chat)
+            audit = RunAudit(
+                requested, resolved, chat.model_name, False, (), request.context_policy,
+            )
+            return AgentRunResult(requested, resolved, chat=chat, audit=audit)
         if resolved == WorkMode.SEARCH:
             notify("search", "正在检索并整理可直接访问的结果…")
             response = self._search_service.search(request.question, locale=request.locale, region=request.region)
             qualifier = "演示" if self.settings.mock_search else "真实"
             notify("saved", f"已整理 {len(response.items)} 条{qualifier}结果")
-            return AgentRunResult(requested, resolved, search=response)
-        result = self.research(request.question, progress, request.brief)
-        return AgentRunResult(requested, resolved, research=result)
+            providers_used = tuple(dict.fromkeys(item.provider.split("/", 1)[0] for item in response.items))
+            audit = RunAudit(requested, resolved, "", True, providers_used, ContextPolicy.FRESH)
+            return AgentRunResult(requested, resolved, search=response, audit=audit)
+        context_policy = self._context.resolve(
+            request.previous_research,
+            request.question,
+            request.context_policy,
+        )
+        if context_policy == ContextPolicy.FOLLOW_UP and request.previous_research is not None:
+            result = self.follow_up(request.previous_research, request.question, progress)
+        else:
+            result = self.research(request.question, progress, request.brief)
+        providers_used = tuple(dict.fromkeys(source.provider.split("/", 1)[0] for source in result.sources))
+        audit = RunAudit(
+            requested,
+            resolved,
+            "" if self.settings.mock_llm else self.settings.llm.model,
+            True,
+            providers_used,
+            context_policy,
+        )
+        return AgentRunResult(requested, resolved, research=result, audit=audit)
 
     def research(self, question: str, progress=None, brief: ResearchBrief | None = None) -> ResearchResult:
         """执行研究；``brief`` 可约束领域、信息类型和最终报告规格。"""

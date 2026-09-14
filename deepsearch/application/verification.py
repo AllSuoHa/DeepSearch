@@ -144,6 +144,43 @@ class AnswerValidator:
 
 
 _SOURCE_SECTION_PATTERN = re.compile(r"(?ms)^##\s+(?:参考来源|全部来源)\s*$.*\Z")
+_OUTER_MARKDOWN_FENCE_PATTERN = re.compile(
+    r"\A\s*```(?:markdown|md)?[^\S\r\n]*\r?\n(?P<body>.*)\r?\n```[^\S\r\n]*\s*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOCUMENT_TITLE_PATTERN = re.compile(r"\A#(?!#)\s+[^\r\n]+(?:\r?\n+|\Z)")
+_SECOND_LEVEL_HEADING_PATTERN = re.compile(r"(?m)^##\s+([^\r\n]+?)\s*$")
+
+
+def normalize_markdown_document(report: str) -> str:
+    """移除模型偶尔添加的整篇 Markdown 代码围栏。"""
+
+    normalized = report.strip()
+    match = _OUTER_MARKDOWN_FENCE_PATTERN.fullmatch(normalized)
+    return match.group("body").strip() if match else normalized
+
+
+def report_body_without_source_section(report: str) -> str:
+    """返回适合正文视图的报告内容，来源仍保留在持久化文档中。"""
+
+    normalized = normalize_markdown_document(report)
+    match = _SOURCE_SECTION_PATTERN.search(normalized)
+    return normalized[: match.start()].rstrip() if match else normalized
+
+
+def report_body_for_conversation(report: str) -> str:
+    """压缩聊天视图中的文档式标题，完整结构仍保留在下载和资料库中。"""
+
+    body = report_body_without_source_section(report)
+    without_title = _DOCUMENT_TITLE_PATTERN.sub("", body, count=1).lstrip()
+    visible = without_title or body
+    headings = list(_SECOND_LEVEL_HEADING_PATTERN.finditer(visible))
+    if len(headings) == 1 and headings[0].group(1).strip() in {"结论", "摘要"}:
+        # 简单事实报告只有一个结论时，章节标题会让普通回答显得像大号文档。
+        # 会话中直接展示正文即可，下载文件仍保留标准报告结构。
+        compact = visible[headings[0].end():].lstrip()
+        return compact or visible
+    return visible
 
 
 def canonicalize_source_section(report: str, sources: list[Source], heading: str = "参考来源") -> str:
@@ -153,7 +190,9 @@ def canonicalize_source_section(report: str, sources: list[Source], heading: str
     漏掉状态信息。统一替换后，旧报告在页面重绘时也能获得一致的可点击样式。
     """
 
-    normalized = report.strip()
+    # 某些模型即使被要求返回 Markdown 全文，仍会在最外层加代码围栏。
+    # 若不先解包，页面会显示带复制按钮的代码块，来源区也无法被正确替换。
+    normalized = normalize_markdown_document(report)
     match = _SOURCE_SECTION_PATTERN.search(normalized)
     body = normalized[: match.start()].rstrip() if match else normalized
     return f"{body}\n\n{source_table(sources, heading=heading)}".strip() + "\n"
@@ -176,8 +215,15 @@ def source_table(sources: list[Source], heading: str = "全部来源") -> str:
             status = "已读取正文" if source.fetched else "搜索摘要"
         score = round(source.quality_score * 100)
         metadata = f"`{host}` · {status}"
+        if source.provider:
+            metadata += f" · Provider `{source.provider}`"
         if score > 0:
             metadata += f" · 质量 {score}/100"
+        timing = (
+            f"发布日期/更新：{source.published_at or '未知'} · "
+            f"检索时间：{source.retrieved_at or '未知'} · 时效：{source.freshness_status}"
+        )
+        query = " ".join(source.query.split())[:240] or "未记录"
         if source.url.startswith(("http://", "https://")):
             destination = source.url.replace("<", "%3C").replace(">", "%3E").replace(" ", "%20")
             title_markup = f"[{title}](<{destination}>)"
@@ -185,7 +231,9 @@ def source_table(sources: list[Source], heading: str = "全部来源") -> str:
             title_markup = title
         lines.extend([
             f"> **[{source.source_id}] {title_markup}**  ",
-            f"> {metadata}",
+            f"> {metadata}  ",
+            f"> 查询：{query}  ",
+            f"> {timing}",
             "",
         ])
     return "\n".join(lines).rstrip()

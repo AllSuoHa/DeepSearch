@@ -7,11 +7,15 @@ from uuid import uuid4
 
 import streamlit as st
 
-from deepsearch.application.verification import canonicalize_source_section
+from deepsearch.application.verification import (
+    canonicalize_source_section,
+    report_body_for_conversation,
+)
 from deepsearch.domain.models import (
     RESEARCH_INFORMATION_TYPES,
     AgentRequest,
     AgentRunResult,
+    ContextPolicy,
     ReportSpecification,
     ResearchBrief,
     WorkMode,
@@ -39,6 +43,7 @@ from deepsearch.presentation.web.support import (
     cancel_background_run,
     chat_history_from_messages,
     claim_submission,
+    conversation_store,
     create_agent,
     discard_background_run,
     format_elapsed,
@@ -91,17 +96,26 @@ def request_run_stop() -> None:
             "conversation_id": handle.conversation_id,
             "question": handle.question,
             "requested_mode": handle.requested_mode.value,
+            "message_id": getattr(handle, "user_message_id", ""),
         }
+        # 停止后立即回填原问题。输入区会解锁，用户既可以原样继续，
+        # 也可以修改后重新发送，而不需要从历史消息手工复制。
+        st.session_state["assistant-draft"] = handle.question
     cancel_background_run(run_id)
     st.session_state.active_run_id = ""
     st.session_state.agent_run_state = "stopped"
 
 
-def queue_run(question: str, mode: WorkMode) -> None:
+def queue_run(
+    question: str,
+    mode: WorkMode,
+    context_policy: ContextPolicy = ContextPolicy.CONVERSATION,
+) -> None:
     """把追问或模式重跑放入下一轮，并复用与输入提交相同的状态机。"""
 
     st.session_state.pending_question = question
     st.session_state.pending_work_mode = mode.value
+    st.session_state.pending_context_policy = context_policy.value
     prepare_run()
 
 
@@ -109,7 +123,7 @@ def queue_mode_rerun(question: str, mode: WorkMode) -> None:
     """用另一模式重跑原问题，不在会话中重复追加用户消息。"""
 
     st.session_state.pending_resume = True
-    queue_run(question, mode)
+    queue_run(question, mode, ContextPolicy.FRESH)
 
 
 def submit_composer(submitted_text: object | None = None) -> None:
@@ -148,8 +162,38 @@ def submit_composer(submitted_text: object | None = None) -> None:
         mode,
     ):
         return
+    resumable = st.session_state.get("resumable_run", {})
+    if (
+        isinstance(resumable, dict)
+        and resumable.get("conversation_id") == st.session_state.get("current_conversation_id")
+    ):
+        message_id = str(resumable.get("message_id", ""))
+        replaced = False
+        if message_id:
+            replaced = conversation_store().replace_last_user_message(
+                str(resumable["conversation_id"]),
+                message_id,
+                question,
+                mode.value,
+            )
+        if replaced:
+            for message in reversed(st.session_state.messages):
+                if str(message.get("message_id", "")) == message_id:
+                    message["content"] = question
+                    message["mode"] = mode.value
+                    break
+            st.session_state.pending_resume = True
+        elif str(resumable.get("question", "")).strip() == question:
+            # 兼容没有 message_id 的热更新前任务句柄；原文未改变时仍可
+            # 复用现有用户消息，避免重复显示。
+            st.session_state.pending_resume = True
+        st.session_state.resumable_run = {}
     st.session_state["assistant-draft"] = ""
-    queue_run(question, mode)
+    queue_run(
+        question,
+        mode,
+        ContextPolicy.FRESH if st.session_state.get("pending_resume") else ContextPolicy.CONVERSATION,
+    )
 
 
 def resume_stopped_run() -> None:
@@ -164,8 +208,30 @@ def resume_stopped_run() -> None:
     except ValueError:
         mode = WorkMode.CHAT
     st.session_state.resumable_run = {}
+    st.session_state["assistant-draft"] = ""
     st.session_state.pending_resume = True
-    queue_run(question, mode)
+    queue_run(question, mode, ContextPolicy.FRESH)
+
+
+def render_running_question_actions(message_key: str, question: str) -> None:
+    """为正在处理的用户消息提供轻量复制和修改入口。"""
+
+    with st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        gap="xsmall",
+        key=f"running-question-actions-{message_key}",
+    ):
+        with st.popover("复制", icon=":material/content_copy:", width=88, wrap=False):
+            st.caption("点击右上角复制")
+            st.code(question, language=None, wrap_lines=True)
+        st.button(
+            "修改问题",
+            icon=":material/edit:",
+            key=f"edit-running-question-{message_key}",
+            on_click=request_run_stop,
+            help="停止当前任务，并把原问题放回输入框",
+        )
 
 
 def handle_was_cancelled(handle: BackgroundRunHandle) -> bool:
@@ -188,7 +254,7 @@ def retry_failed_run(message_id: str, question: str, requested_mode: str) -> Non
         mode = WorkMode.CHAT
     mark_error_retried(message_id)
     st.session_state.pending_resume = True
-    queue_run(question, mode)
+    queue_run(question, mode, ContextPolicy.FRESH)
 
 
 def append_message_once(message: dict) -> None:
@@ -250,14 +316,39 @@ def render_error_message(message: dict, message_key: str, *, include_status: boo
             )
 
 
-def render_chat(run) -> None:
+def render_run_audit(run, message_key: str) -> None:
+    """展示实际执行事实；字段来自应用结果，不根据页面按钮反推。"""
+
+    audit = run.audit
+    if audit is None:
+        return
+    mode_label = {WorkMode.CHAT: "问答", WorkMode.SEARCH: "搜索", WorkMode.RESEARCH: "研究"}
+    context_label = {
+        ContextPolicy.FRESH: "全新任务",
+        ContextPolicy.CONVERSATION: "普通对话",
+        ContextPolicy.FOLLOW_UP: "基于上一结果追问",
+    }
+    with st.expander("运行信息", icon=":material/info:", key=f"run-audit-{message_key}"):
+        st.markdown(
+            f"- 用户选择：{mode_label.get(audit.requested_mode, audit.requested_mode.value)}\n"
+            f"- 实际执行：{mode_label.get(audit.actual_mode, audit.actual_mode.value)}\n"
+            f"- 实际模型：{audit.model_name or '未调用模型'}\n"
+            f"- 使用搜索：{'是' if audit.used_search else '否'}\n"
+            f"- 搜索源：{'、'.join(audit.search_providers) if audit.search_providers else '无'}\n"
+            f"- 上下文：{context_label.get(audit.context_policy, audit.context_policy.value)}"
+        )
+
+
+def render_chat(run, message_key: str = "latest") -> None:
     """直接回答是普通助手消息，不附带搜索或研究专属模块。"""
 
     st.markdown(run.chat.answer)
+    render_run_audit(run, message_key)
 
 
 def render_search(run, message_key: str = "latest") -> None:
     render_search_response(run.search, message_key)
+    render_run_audit(run, message_key)
 
 
 def render_research(run, message_key: str = "latest") -> None:
@@ -265,9 +356,11 @@ def render_research(run, message_key: str = "latest") -> None:
     # 报告正文单独拥有稳定容器，便于在历史消息和流式结束后的重绘中
     # 保持一致的阅读样式，同时不影响搜索卡片和直接回答。
     with st.container(key=f"research-report-{message_key}"):
-        # 旧记录可能保存了模型生成的裸 URL 来源区；展示时同样依据结构化
-        # Source 重建，确保历史报告和新报告使用一致的可点击卡片。
-        st.markdown(canonicalize_source_section(result.report, result.sources))
+        # 下载和持久化文档保留完整来源；会话正文只显示报告主体，避免与
+        # 紧随其后的“证据详情与审校 → 来源链接”重复。先规范化也能让旧记录
+        # 中被 ```markdown 包住的全文恢复为标题、段落和列表。
+        complete_report = canonicalize_source_section(result.report, result.sources)
+        st.markdown(report_body_for_conversation(complete_report))
     with st.expander(
         "证据详情与审校",
         icon=":material/fact_check:",
@@ -281,6 +374,11 @@ def render_research(run, message_key: str = "latest") -> None:
             st.markdown("**独立审校处理**")
             for issue in result.review_summary:
                 st.markdown(f"- {issue}")
+        if result.provider_failures:
+            details = "；".join(
+                f"{name}：{reason}" for name, reason in result.provider_failures.items()
+            )
+            st.warning(f"部分搜索源已降级，任务由其余来源继续完成。{details}")
         if result.sources:
             st.markdown("**来源链接**")
             for source in result.sources:
@@ -288,10 +386,18 @@ def render_research(run, message_key: str = "latest") -> None:
                     st.markdown(f"{source.source_id}. [{source.title}]({source.url})")
                 else:
                     st.caption(f"{source.source_id}. {source.title} · 无可访问链接")
+                status = "已读取正文" if source.fetched else "使用搜索摘要"
+                st.caption(
+                    f"{status} · Provider: {source.provider or '未知'} · "
+                    f"Query: {source.query or '未记录'} · "
+                    f"发布/更新: {source.published_at or '未知'} · "
+                    f"检索: {source.retrieved_at or '未知'} · 时效: {source.freshness_status}"
+                )
         if result.scorecard.dimensions:
             render_scorecard(result.scorecard, key=f"scorecard-{message_key}")
         for trace in result.trace:
             st.caption(f"第 {trace.round_number} 轮 · {trace.decision}")
+    render_run_audit(run, message_key)
 
 
 def render_active_background_run(
@@ -304,12 +410,11 @@ def render_active_background_run(
     tracker = handle.tracker
     # 运行槽位在耗时等待前已经按 run_id 占位；页面被组件重跑时，新脚本
     # 会接管同一个 Delta 路径，不再把上一轮灰色状态留成第二条“思考中”。
-    target = (
-        output_slot
-        if output_slot is not None
-        else st.container(key=f"active-run-output-{handle.run_id}")
-    )
-    with target, st.chat_message("assistant", avatar=ASSISTANT_ICON):
+    target = output_slot if output_slot is not None else st.empty()
+    # st.empty 是单元素占位符；在里面放一个子容器才能稳定承载状态、结果
+    # 和错误卡片，并在任务消费后一次性清空，不留下截图中的空蓝色占位带。
+    surface = target.container(key=f"active-run-output-{handle.run_id}")
+    with surface, st.chat_message("assistant", avatar=ASSISTANT_ICON):
         # status 的外层 key 与 run_id 固定；流式刷新只改内部 Markdown，避免
         # 用户展开后因组件重建而自动收起。
         with st.container(key=f"thinking-{handle.run_id}"):
@@ -383,8 +488,11 @@ def render_active_background_run(
                 append_message_once(assistant_message)
                 st.session_state.last_run = run
                 st.session_state.last_result = run.research
+                st.session_state.last_result_conversation_id = (
+                    handle.conversation_id if run.research is not None else ""
+                )
                 if run.chat is not None:
-                    render_chat(run)
+                    render_chat(run, handle.run_id)
                 elif run.search is not None:
                     render_search(run, handle.run_id)
                 else:
@@ -395,6 +503,7 @@ def render_active_background_run(
             # Streamlit 页面切换会以内部 BaseException 终止当前脚本。此时
             # consumed 仍为 False，必须保留注册表与运行状态供返回时接续。
             if consumed:
+                target.empty()
                 if stop_button_slot is not None:
                     stop_button_slot.empty()
                 discard_background_run(handle.run_id)
@@ -494,11 +603,6 @@ def render_actions(run) -> None:
         with st.popover("复制", icon=":material/content_copy:", width=104, wrap=False):
             st.caption("使用右上角复制按钮")
             st.code(content, language="markdown", height=180)
-        with st.popover("继续追问", icon=":material/chat:", width=132, wrap=False):
-            follow_up = st.text_input("追问内容", placeholder="针对当前结果继续问…", key="result-follow-up")
-            if st.button("发送追问", type="primary", disabled=not bool(follow_up.strip()), key="send-follow-up"):
-                queue_run(follow_up.strip(), run.resolved_mode)
-                st.rerun()
         alternate = WorkMode.RESEARCH if run.resolved_mode == WorkMode.SEARCH else WorkMode.SEARCH
         alternate_label = "研究" if alternate == WorkMode.RESEARCH else "搜索"
         st.button(
@@ -680,13 +784,26 @@ if st.session_state.messages:
                 if role == "assistant" and message.get("kind") == "error":
                     render_error_message(message, message_key)
                 elif message_run is not None and message_run.chat is not None:
-                    render_chat(message_run)
+                    render_chat(message_run, message_key)
                 elif message_run is not None and message_run.search is not None:
                     render_search(message_run, message_key)
                 elif message_run is not None and message_run.research is not None:
                     render_research(message_run, message_key)
                 else:
                     st.markdown(message.get("content", ""))
+                if role == "user" and index == len(st.session_state.messages) - 1:
+                    running_id = str(st.session_state.get("active_run_id", ""))
+                    running_handle = active_background_run(running_id) if running_id else None
+                    if (
+                        running_handle is not None
+                        and running_handle.conversation_id
+                        == str(st.session_state.get("current_conversation_id", ""))
+                        and running_handle.question == str(message.get("content", "")).strip()
+                    ):
+                        render_running_question_actions(
+                            message_key,
+                            str(message.get("content", "")).strip(),
+                        )
 
 active_run_id = str(st.session_state.get("active_run_id", ""))
 current_conversation_id = str(st.session_state.get("current_conversation_id", ""))
@@ -718,14 +835,17 @@ resumable_for_current = bool(
 current_run_active = current_active_handle is not None or (
     st.session_state.agent_run_state == "running" and not active_run_id
 )
-composer_locked = current_run_active or foreign_run_active or resumable_for_current
+composer_locked = current_run_active or foreign_run_active
 
-# 先占住运行结果在主页面中的稳定位置，再渲染底部输入栏和执行耗时等待。
-# pending_run_id 与随后注册的 active_run_id 相同，因此提交轮和恢复轮会复用
-# 同一个 key，Streamlit 能正确替换旧元素而不是并排保留淡化副本。
+if resumable_for_current and not str(st.session_state.get("assistant-draft", "")).strip():
+    st.session_state["assistant-draft"] = str(resumable.get("question", ""))
+
+# 先用可整体清空的占位符预留运行结果位置，再渲染底部输入栏和耗时等待。
+# pending_run_id 让提交轮也能预留位置；接回 Future 后，内部子容器再以
+# active_run_id 获得稳定身份，任务消费时则连同占位空白一起移除。
 run_output_id = active_run_id or str(st.session_state.get("pending_run_id", ""))
 active_run_output_slot = (
-    st.container(key=f"active-run-output-{run_output_id}")
+    st.empty()
     if current_run_active and run_output_id
     else None
 )
@@ -871,6 +991,14 @@ with st.bottom:
                             on_click=resume_stopped_run,
                             help="从原问题重新开始执行",
                         )
+                        st.button(
+                            "发送",
+                            icon=":material/arrow_upward:",
+                            type="primary",
+                            key="composer-action-send",
+                            on_click=submit_composer,
+                            help="发送输入框中修改后的问题",
+                        )
                     elif foreign_run_active:
                         st.button(
                             "其他对话运行中",
@@ -891,6 +1019,7 @@ with st.bottom:
 
 prompt = st.session_state.pop("pending_question", "")
 pending_work_mode = st.session_state.pop("pending_work_mode", "")
+pending_context_policy = st.session_state.pop("pending_context_policy", ContextPolicy.CONVERSATION.value)
 resume_existing_message = bool(st.session_state.pop("pending_resume", False))
 
 if prompt:
@@ -908,7 +1037,11 @@ if prompt:
         -1,
     )
     reuse_user_message = resume_existing_message and matching_user_index >= 0
-    if not reuse_user_message:
+    if reuse_user_message:
+        user_message_id = str(
+            st.session_state.messages[matching_user_index].get("message_id", "")
+        )
+    else:
         user_message_id = uuid4().hex
         user_message = {
             "message_id": user_message_id,
@@ -934,7 +1067,12 @@ if prompt:
     # 复用本轮已经从 Secrets 合并好的配置，避免任务创建前再次加载配置时
     # 把设置页显示的本地问答模型丢失。
     agent = create_agent(profile, settings=settings)
-    previous = st.session_state.get("last_result")
+    previous = (
+        st.session_state.get("last_result")
+        if st.session_state.get("last_result_conversation_id")
+        == st.session_state.get("current_conversation_id")
+        else None
+    )
     # AgentRequest 在页面线程构造，后台线程只执行领域服务；这样即使页面
     # 被切走，任务也不依赖已经失效的 Streamlit ScriptRunContext。
     # “继续执行”和错误卡片重试都复用历史中的原用户消息。构造上下文时
@@ -944,6 +1082,12 @@ if prompt:
         if reuse_user_message
         else st.session_state.messages[:-1]
     )
+    try:
+        requested_context_policy = ContextPolicy(pending_context_policy)
+    except ValueError:
+        requested_context_policy = (
+            ContextPolicy.FRESH if resume_existing_message else ContextPolicy.CONVERSATION
+        )
     request = AgentRequest(
         question=prompt,
         mode=requested_mode,
@@ -951,12 +1095,11 @@ if prompt:
         region={"中国大陆": "CN", "美国": "US", "全球": "ALL"}[region_label],
         conversation_id=st.session_state.current_conversation_id,
         chat_history=chat_history_from_messages(history_messages),
+        context_policy=requested_context_policy,
+        previous_research=previous,
     )
 
     def execute_run() -> AgentRunResult:
-        if requested_mode == WorkMode.RESEARCH and previous is not None:
-            result = agent.follow_up(previous, prompt, tracker.update)
-            return AgentRunResult(requested_mode, WorkMode.RESEARCH, research=result)
         return agent.run(request, tracker.update)
 
     handle = BackgroundRunHandle(
@@ -966,6 +1109,7 @@ if prompt:
         requested_mode=requested_mode,
         tracker=tracker,
         future=background_executor().submit(execute_run),
+        user_message_id=user_message_id,
     )
     register_background_run(handle)
     st.session_state.active_run_id = run_id
@@ -992,5 +1136,12 @@ elif st.session_state.agent_run_state == "running":
         st.warning("后台任务上下文已丢失，应用可能已重启，请从原问题重新执行。", icon=":material/restart_alt:")
 
 last_run = st.session_state.get("last_run")
-if last_run is not None and st.session_state.messages:
+latest_message = st.session_state.messages[-1] if st.session_state.messages else {}
+if (
+    last_run is not None
+    and latest_message.get("role") == "assistant"
+    and latest_message.get("kind") in {"chat", "search", "research"}
+    and not current_run_active
+    and not foreign_run_active
+):
     render_actions(last_run)

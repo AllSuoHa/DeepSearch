@@ -19,8 +19,10 @@ class WikipediaSearch(SearchProvider):
     """作为第二条免费检索路径，补充百科类背景和定义信息。"""
 
     name = "wikipedia"
+    capabilities = frozenset({"background"})
 
     def __init__(self, timeout: float = 8.0) -> None:
+        super().__init__()
         self.timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
@@ -36,8 +38,11 @@ class WikipediaSearch(SearchProvider):
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
-            logger.warning("Wikipedia 搜索失败 query=%r error=%s", query, exc)
+            self.last_status = "rate_limited" if getattr(exc, "code", 0) == 429 else "connection_failed"
+            self.last_error = "搜索服务限流" if self.last_status == "rate_limited" else type(exc).__name__
+            logger.warning("Wikipedia 搜索失败 error=%s", type(exc).__name__)
             return []
+        self.last_status, self.last_error = "available", ""
         results = []
         for item in payload.get("query", {}).get("search", [])[:limit]:
             title = str(item.get("title", "")).strip()

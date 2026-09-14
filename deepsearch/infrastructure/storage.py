@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from ..application.search_service import search_response_markdown
 from ..domain.models import SearchResponse
+from ..security import redact_sensitive_text, redact_sensitive_value
 
 
 # 初次启动时提供少量实用快捷输入。它们会立即写入用户数据目录，之后与
@@ -54,8 +55,10 @@ class FileReportStorage(ReportStorage):
         normalized_format = output_format.lower().strip()
         if normalized_format not in self._extensions:
             raise ValueError(f"不支持的报告格式：{output_format}；可选 markdown、text、json")
+        safe_question = redact_sensitive_text(question)
+        safe_report = redact_sensitive_text(report)
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
-        slug = _slugify(question)
+        slug = _slugify(safe_question)
         extension = self._extensions[normalized_format]
         path = self.directory / f"{stamp}_{slug}{extension}"
         # 同一秒内的同名问题通过递增后缀避免覆盖已有研究资产。
@@ -63,7 +66,7 @@ class FileReportStorage(ReportStorage):
         while path.exists():
             path = self.directory / f"{stamp}_{slug}_{suffix}{extension}"
             suffix += 1
-        path.write_text(self._serialize(question, report, normalized_format), encoding="utf-8")
+        path.write_text(self._serialize(safe_question, safe_report, normalized_format), encoding="utf-8")
         return path
 
     def list(self, query: str = "") -> list[Path]:
@@ -114,13 +117,14 @@ class FileArtifactStorage:
         """保存可下载、可投递的搜索快照，并回填响应资产路径。"""
 
         self.directory.mkdir(parents=True, exist_ok=True)
+        safe_query = redact_sensitive_text(response.query)
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
-        path = self.directory / f"{stamp}_{_slugify(response.query)}_搜索.md"
+        path = self.directory / f"{stamp}_{_slugify(safe_query)}_搜索.md"
         suffix = 1
         while path.exists():
-            path = self.directory / f"{stamp}_{_slugify(response.query)}_搜索_{suffix}.md"
+            path = self.directory / f"{stamp}_{_slugify(safe_query)}_搜索_{suffix}.md"
             suffix += 1
-        path.write_text(search_response_markdown(response), encoding="utf-8")
+        path.write_text(redact_sensitive_text(search_response_markdown(response)), encoding="utf-8")
         response.artifact_path = path
         return path
 
@@ -261,15 +265,17 @@ class ConversationStore:
     def append(self, conversation: dict, message: dict) -> None:
         """只保留白名单字段，并以消息 ID 保证恢复流程可安全重放。"""
 
-        safe = {
+        safe = redact_sensitive_value({
             key: value for key, value in message.items()
             if key in {
                 "message_id", "role", "content", "mode", "requested_mode", "kind",
                 "artifact_path", "sources", "delivery",
                 "question", "summary", "rounds", "stop_reason", "review_summary",
                 "queries", "warnings", "used_fallback", "progress_steps", "retried",
+                "model_name", "used_search", "search_providers", "context_policy",
+                "provider_failures",
             }
-        }
+        })
         messages = conversation.setdefault("messages", [])
         message_id = str(safe.get("message_id", ""))
         # 页面切走后返回时，已完成的后台 Future 可能被新的页面轮次再次
@@ -280,6 +286,43 @@ class ConversationStore:
         if conversation.get("title") == "新对话" and safe.get("role") == "user":
             conversation["title"] = str(safe.get("content", "")).strip()[:36] or "新对话"
         self.save(conversation)
+
+    def replace_last_user_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        content: str,
+        mode: str,
+    ) -> bool:
+        """修改尚无回答的最后一条用户消息，供暂停后的问题编辑使用。"""
+
+        if self._id_pattern.fullmatch(conversation_id or "") is None:
+            raise ValueError("无效的会话记录 ID")
+        if self._id_pattern.fullmatch(message_id or "") is None:
+            raise ValueError("无效的消息 ID")
+        normalized = content.strip()
+        if not normalized or len(normalized) > 1600:
+            raise ValueError("问题长度必须为 1 到 1600 个字符")
+        if mode not in {"auto", "chat", "search", "research"}:
+            raise ValueError("无效的工作模式")
+        conversation = self.load(conversation_id)
+        if conversation is None:
+            return False
+        messages = conversation.get("messages", [])
+        if not messages:
+            return False
+        message = messages[-1]
+        if message.get("role") != "user" or str(message.get("message_id", "")) != message_id:
+            # 只允许改写末尾尚未获得助手回答的问题，不能借此改写已完成历史。
+            return False
+        previous_content = str(message.get("content", "")).strip()
+        message["content"] = normalized
+        message["mode"] = mode
+        previous_auto_title = previous_content[:36] or "新对话"
+        if conversation.get("title") in {"新对话", previous_auto_title}:
+            conversation["title"] = normalized[:36]
+        self.save(conversation)
+        return True
 
     def list(self, limit: int | None = 20) -> list[dict]:
         """按最近更新时间返回轻量会话摘要；``None`` 表示读取全部。"""

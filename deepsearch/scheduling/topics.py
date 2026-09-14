@@ -157,7 +157,7 @@ class ResearchTaskManager:
             try:
                 tasks.append(ScheduledResearchTask.from_dict(raw))
             except (TypeError, ValueError) as exc:
-                logger.warning("忽略无效研究任务 data=%s error=%s", raw, exc)
+                logger.warning("忽略无效研究任务 error=%s", type(exc).__name__)
         return tasks
 
     def add_task(self, task: ScheduledResearchTask) -> None:
@@ -240,7 +240,7 @@ class ResearchTaskScheduler:
                 self._run_task(task, progress)
             except Exception as exc:
                 # 一个任务失败不阻止同一批次中的其他自动任务。
-                logger.exception("自动任务失败 name=%s error=%s", task.name, exc)
+                logger.exception("自动任务失败 error=%s", type(exc).__name__)
                 continue
             state[task.name] = task.occurrence_key(current)
             completed.append(task.name)
@@ -275,7 +275,7 @@ class ResearchTaskScheduler:
                 outcome = self.publisher.publish(task, result)
             except Exception as exc:
                 # 投递器自身故障也不能让调度器误以为研究失败并重新执行昂贵搜索。
-                logger.exception("CustomerService 报告投递异常 task=%s error=%s", task.name, exc)
+                logger.exception("CustomerService 报告投递异常 error=%s", type(exc).__name__)
                 if progress is not None:
                     progress("deliver", "报告已生成，但知识库投递器异常，请检查日志和 outbox")
             else:
@@ -297,7 +297,7 @@ class ResearchTaskScheduler:
             outcomes = self.publisher.flush_pending()
         except Exception as exc:
             # outbox 故障不能阻断新研究；记录后等待下一轮人工检查。
-            logger.exception("CustomerService outbox 重试失败 error=%s", exc)
+            logger.exception("CustomerService outbox 重试失败 error=%s", type(exc).__name__)
             return
         delivered = sum(outcome.status == "indexed" for outcome in outcomes)
         if delivered:

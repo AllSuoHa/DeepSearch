@@ -24,6 +24,17 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(payload["content_markdown"], markdown)
             self.assertEqual(len(storage.list()), 3)
 
+            protected = storage.save(
+                '问题 DEEPSEARCH_API_KEY="report-secret"',
+                '# 结论\n\nBearer report-token-value',
+                "markdown",
+            )
+            protected_text = protected.read_text(encoding="utf-8")
+            self.assertNotIn("report-secret", protected.name)
+            self.assertNotIn("report-secret", protected_text)
+            self.assertNotIn("report-token-value", protected_text)
+            self.assertIn("[REDACTED]", protected_text)
+
     def test_json_report_rename_updates_question_and_markdown_heading(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

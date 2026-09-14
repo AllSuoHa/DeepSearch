@@ -5,7 +5,9 @@
   "search_content_type": "综合",
   "custom_information_types": [],
   "search_provider": "duckduckgo",
-  "search_provider_order": ["brave", "duckduckgo", "wikipedia"],
+  "search_provider_order": ["tavily", "brave", "searxng", "duckduckgo", "wikipedia", "openalex", "crossref"],
+  "disabled_search_providers": [],
+  "searxng_base_url": "",
   "max_rounds": 3,
   "results_per_query": 4,
   "max_sources": 16,
@@ -30,6 +32,7 @@
     "request_timeout": 30.0,
     "api_key": ""
   },
+  "chat_uses_research_model": false,
   "customer_service": {
     "enabled": false,
     "base_url": "http://127.0.0.1:8000",

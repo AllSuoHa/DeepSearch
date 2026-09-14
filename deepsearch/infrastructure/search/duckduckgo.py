@@ -18,9 +18,11 @@ class DuckDuckGoSearch(SearchProvider):
     """无需 API Key 和第三方包的免费搜索实现。"""
 
     name = "duckduckgo"
+    capabilities = frozenset({"general", "current", "news", "official"})
     endpoint = "https://html.duckduckgo.com/html/"
 
     def __init__(self, timeout: float = 8.0) -> None:
+        super().__init__()
         self.timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[SearchResult]:
@@ -35,7 +37,9 @@ class DuckDuckGoSearch(SearchProvider):
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = response.read(1_500_000).decode("utf-8", errors="replace")
         except Exception as exc:  # network failures are an expected degraded path
-            logger.warning("搜索失败 query=%r error=%s", query, exc)
+            self.last_status = "rate_limited" if getattr(exc, "code", 0) == 429 else "connection_failed"
+            self.last_error = "搜索服务限流" if self.last_status == "rate_limited" else type(exc).__name__
+            logger.warning("DuckDuckGo 搜索失败 error=%s", type(exc).__name__)
             return []
 
         # HTML 结构变化被隔离在本适配器内，不会影响应用层研究逻辑。
@@ -59,7 +63,8 @@ class DuckDuckGoSearch(SearchProvider):
             snippet = _clean_html(snippets[index]) if index < len(snippets) else ""
             if target.startswith("http"):
                 results.append(SearchResult(clean_title, target, snippet, query, self.name))
-        logger.info("搜索完成 provider=%s query=%r results=%d", self.name, query, len(results))
+        logger.info("搜索完成 provider=%s results=%d", self.name, len(results))
+        self.last_status, self.last_error = "available", ""
         return results
 
 

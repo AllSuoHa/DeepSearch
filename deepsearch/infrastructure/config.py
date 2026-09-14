@@ -86,8 +86,13 @@ class Settings:
     search_content_type: str = SearchContentType.GENERAL.value
     custom_information_types: tuple[str, ...] = ()
     search_provider: str = "duckduckgo"
-    search_provider_order: tuple[str, ...] = ("brave", "duckduckgo", "wikipedia")
+    search_provider_order: tuple[str, ...] = (
+        "tavily", "brave", "searxng", "duckduckgo", "wikipedia", "openalex", "crossref",
+    )
+    disabled_search_providers: tuple[str, ...] = ()
     brave_api_key: str = ""
+    tavily_api_key: str = ""
+    searxng_base_url: str = ""
     max_rounds: int = 3
     results_per_query: int = 4
     max_sources: int = 16
@@ -106,6 +111,7 @@ class Settings:
     chat_llm: LLMSettings = field(default_factory=lambda: LLMSettings(
         base_url="", model="", request_timeout=30.0,
     ))
+    chat_uses_research_model: bool = False
     customer_service: CustomerServiceSettings = field(default_factory=CustomerServiceSettings)
     topics: list[dict[str, Any]] = field(default_factory=list)
 
@@ -134,6 +140,21 @@ class Settings:
             else:
                 search_content_type = SearchContentType.GENERAL.value
         self.search_content_type = search_content_type
+        allowed_providers = (
+            "tavily", "brave", "searxng", "duckduckgo", "wikipedia", "openalex", "crossref",
+        )
+        self.disabled_search_providers = tuple(dict.fromkeys(
+            name for name in self.disabled_search_providers if name in allowed_providers
+        ))
+        provider_order = list(dict.fromkeys(
+            name for name in self.search_provider_order if name in allowed_providers
+        )) or ["duckduckgo"]
+        # 旧配置从未列出学术源，因为它们过去在装配时无条件追加。迁移时
+        # 延续该能力；只有新设置明确写入 disabled 才真正关闭。
+        for academic_name in ("openalex", "crossref"):
+            if academic_name not in provider_order and academic_name not in self.disabled_search_providers:
+                provider_order.append(academic_name)
+        self.search_provider_order = tuple(provider_order)
         self.mode = "mock" if self.runtime_mode == "mock" else "auto"
 
     @property
@@ -159,7 +180,7 @@ class Settings:
         """问答地址是否明确指向本机 OpenAI 兼容服务。"""
 
         try:
-            hostname = (urllib.parse.urlsplit(self.chat_llm.base_url).hostname or "").lower()
+            hostname = (urllib.parse.urlsplit(self.effective_chat_llm.base_url).hostname or "").lower()
         except ValueError:
             return False
         return hostname in {"localhost", "127.0.0.1", "::1"}
@@ -168,8 +189,9 @@ class Settings:
     def chat_model_available(self) -> bool:
         """判断独立问答连接是否完整；本机服务无需真实 API Key。"""
 
-        endpoint_ready = bool(self.chat_llm.base_url and self.chat_llm.model)
-        credentials_ready = bool(self.chat_llm.api_key) or self.chat_model_is_local
+        active = self.effective_chat_llm
+        endpoint_ready = bool(active.base_url and active.model)
+        credentials_ready = bool(active.api_key) or self.chat_model_is_local
         # “演示/在线”控制搜索数据源。本机 Ollama 不联网，因此即使搜索处于
         # 演示模式也可以用于问答；远端问答模型仍只在在线模式调用。
         runtime_ready = self.runtime_mode != "mock" or self.chat_model_is_local
@@ -179,10 +201,15 @@ class Settings:
     def effective_chat_llm(self) -> LLMSettings:
         """返回可直接交给兼容客户端的问答配置。"""
 
-        if self.chat_model_is_local and not self.chat_llm.api_key:
+        active = self.llm if self.chat_uses_research_model else self.chat_llm
+        try:
+            hostname = (urllib.parse.urlsplit(active.base_url).hostname or "").lower()
+        except ValueError:
+            hostname = ""
+        if hostname in {"localhost", "127.0.0.1", "::1"} and not active.api_key:
             # OpenAI 兼容客户端需要 Authorization 头；Ollama 会忽略其内容。
-            return replace(self.chat_llm, api_key="ollama")
-        return self.chat_llm
+            return replace(active, api_key="ollama")
+        return active
 
 
 def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
@@ -199,7 +226,8 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
     llm = LLMSettings(
         base_url=os.getenv("DEEPSEARCH_BASE_URL", llm_raw.get("base_url", llm_defaults.base_url)),
         model=os.getenv("DEEPSEARCH_MODEL", llm_raw.get("model", llm_defaults.model)),
-        api_key=os.getenv("DEEPSEARCH_API_KEY", llm_raw.get("api_key", "")),
+        # 普通 JSON 不可信且可能被提交；研究密钥也只从环境或 Secrets 注入。
+        api_key=os.getenv("DEEPSEARCH_API_KEY", ""),
         request_timeout=max(
             10.0,
             float(
@@ -277,8 +305,16 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         search_content_type=str(raw.get("search_content_type", SearchContentType.GENERAL.value)),
         custom_information_types=raw.get("custom_information_types", ()),
         search_provider=raw.get("search_provider", "duckduckgo"),
-        search_provider_order=tuple(raw.get("search_provider_order", ("brave", "duckduckgo", "wikipedia"))),
+        search_provider_order=tuple(raw.get(
+            "search_provider_order",
+            ("tavily", "brave", "searxng", "duckduckgo", "wikipedia", "openalex", "crossref"),
+        )),
+        disabled_search_providers=tuple(raw.get("disabled_search_providers", ())),
         brave_api_key=os.getenv("DEEPSEARCH_BRAVE_API_KEY", ""),
+        tavily_api_key=os.getenv("DEEPSEARCH_TAVILY_API_KEY", ""),
+        searxng_base_url=os.getenv(
+            "DEEPSEARCH_SEARXNG_BASE_URL", str(raw.get("searxng_base_url", "")),
+        ),
         max_rounds=int(raw.get("max_rounds", 3)),
         results_per_query=int(raw.get("results_per_query", 4)),
         max_sources=int(raw.get("max_sources", 16)),
@@ -294,6 +330,7 @@ def load_settings(path: str | Path | None = None, **overrides: Any) -> Settings:
         config_path=config_path,
         llm=llm,
         chat_llm=chat_llm,
+        chat_uses_research_model=bool(raw.get("chat_uses_research_model", False)),
         customer_service=customer_service,
         topics=list(raw.get("research_tasks", raw.get("topics", []))),
     )
@@ -315,6 +352,8 @@ def save_settings(settings: Settings) -> None:
         "custom_information_types": list(settings.custom_information_types),
         "search_provider": settings.search_provider,
         "search_provider_order": list(settings.search_provider_order),
+        "disabled_search_providers": list(settings.disabled_search_providers),
+        "searxng_base_url": settings.searxng_base_url,
         "max_rounds": settings.max_rounds,
         "results_per_query": settings.results_per_query,
         "max_sources": settings.max_sources,
@@ -341,6 +380,7 @@ def save_settings(settings: Settings) -> None:
             # 快速回答模型也严格禁止把 API Key 持久化到普通配置。
             "api_key": "",
         },
+        "chat_uses_research_model": settings.chat_uses_research_model,
         "customer_service": {
             "enabled": settings.customer_service.enabled,
             "base_url": settings.customer_service.base_url,

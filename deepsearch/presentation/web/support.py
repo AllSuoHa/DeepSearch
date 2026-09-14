@@ -19,9 +19,11 @@ from ...domain.models import (
     AgentRunResult,
     ChatResult,
     ChatTurn,
+    ContextPolicy,
     QuestionType,
     ResearchBrief,
     ResearchResult,
+    RunAudit,
     SearchPlan,
     SearchResponse,
     SearchResult,
@@ -199,6 +201,7 @@ class BackgroundRunHandle:
     requested_mode: WorkMode
     tracker: RunProgressTracker
     future: Future[AgentRunResult]
+    user_message_id: str = ""
     cancelled: Event = field(default_factory=Event, compare=False, repr=False)
 
 
@@ -281,6 +284,10 @@ def get_settings() -> Settings:
         integration_key = str(st.secrets.get("DEEPSEARCH_CUSTOMER_SERVICE_INTEGRATION_KEY", ""))
         customer_service_api_key = str(st.secrets.get("DEEPSEARCH_CUSTOMER_SERVICE_API_KEY", ""))
         brave_api_key = str(st.secrets.get("DEEPSEARCH_BRAVE_API_KEY", settings.brave_api_key))
+        tavily_api_key = str(st.secrets.get("DEEPSEARCH_TAVILY_API_KEY", settings.tavily_api_key))
+        searxng_base_url = str(st.secrets.get(
+            "DEEPSEARCH_SEARXNG_BASE_URL", settings.searxng_base_url,
+        ))
     # 未创建 secrets 文件是合法状态，此时继续使用配置与环境变量。
     except (FileNotFoundError, KeyError):
         return settings
@@ -304,6 +311,10 @@ def get_settings() -> Settings:
         settings.customer_service.api_access_key = customer_service_api_key
     if brave_api_key:
         settings.brave_api_key = brave_api_key
+    if tavily_api_key:
+        settings.tavily_api_key = tavily_api_key
+    if searxng_base_url:
+        settings.searxng_base_url = searxng_base_url.strip().rstrip("/")
     return settings
 
 
@@ -414,6 +425,7 @@ def init_session_state() -> None:
 
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("last_result", None)
+    st.session_state.setdefault("last_result_conversation_id", "")
     st.session_state.setdefault("last_run", None)
     st.session_state.setdefault("progress_events", [])
     st.session_state.setdefault("config_path", str(PROJECT_ROOT / "config.json"))
@@ -431,6 +443,7 @@ def init_session_state() -> None:
     st.session_state.setdefault("pending_question", "")
     st.session_state.setdefault("pending_run_id", "")
     st.session_state.setdefault("pending_resume", False)
+    st.session_state.setdefault("pending_context_policy", "conversation")
     # 每个浏览器标签页拥有独立作用域；进程级提交闸门据此既能原子去重，
     # 又不会误拦截其他用户恰好提交的相同问题。
     st.session_state.setdefault("submission_scope_id", uuid4().hex)
@@ -452,6 +465,7 @@ def reset_research() -> None:
     cancel_background_run(str(st.session_state.get("active_run_id", "")))
     st.session_state.messages = []
     st.session_state.last_result = None
+    st.session_state.last_result_conversation_id = ""
     st.session_state.last_run = None
     st.session_state.progress_events = []
     st.session_state.current_conversation_id = ""
@@ -460,6 +474,7 @@ def reset_research() -> None:
     st.session_state.resumable_run = {}
     st.session_state.pending_run_id = ""
     st.session_state.pending_resume = False
+    st.session_state.pending_context_policy = "conversation"
 
 
 def conversation_store(settings: Settings | None = None) -> ConversationStore:
@@ -514,6 +529,9 @@ def load_conversation(conversation_id: str) -> bool:
         research_context_from_messages(st.session_state.messages)
         if latest_kind == "research"
         else None
+    )
+    st.session_state.last_result_conversation_id = (
+        conversation_id if st.session_state.last_result is not None else ""
     )
     # 搜索结果不需要恢复网页正文；保存的轻量来源元数据足以重新生成
     # 与首次运行一致的结果卡片、风险标签和链接按钮。
@@ -576,6 +594,22 @@ def run_from_message(messages: list[dict], index: int) -> AgentRunResult | None:
             run.requested_mode = WorkMode(requested)
         except ValueError:
             run.requested_mode = WorkMode.AUTO
+        actual = run.resolved_mode
+        try:
+            context_policy = ContextPolicy(str(message.get("context_policy", "fresh")))
+        except ValueError:
+            context_policy = ContextPolicy.FRESH
+        providers = tuple(
+            str(value) for value in message.get("search_providers", []) if str(value).strip()
+        )
+        run.audit = RunAudit(
+            run.requested_mode,
+            actual,
+            str(message.get("model_name", "")),
+            bool(message.get("used_search", actual in {WorkMode.SEARCH, WorkMode.RESEARCH})),
+            providers,
+            context_policy,
+        )
     return run
 
 
@@ -607,6 +641,7 @@ def chat_run_from_messages(messages: list[dict]) -> AgentRunResult | None:
             question=question,
             answer=str(message.get("content", "")),
             used_fallback=bool(message.get("used_fallback", False)),
+            model_name=str(message.get("model_name", "")),
         )
         return AgentRunResult(WorkMode.AUTO, WorkMode.CHAT, chat=result)
     return None
@@ -644,6 +679,8 @@ def search_run_from_messages(messages: list[dict]) -> AgentRunResult | None:
             risk_level=str(item.get("risk_level", "未验证")),
             risk_reasons=reasons,
             published_at=str(item.get("published_at", "")),
+            retrieved_at=str(item.get("retrieved_at", "")),
+            freshness_status=str(item.get("freshness_status", "unknown")),
         ))
 
     warnings = message.get("warnings", ())
@@ -656,6 +693,13 @@ def search_run_from_messages(messages: list[dict]) -> AgentRunResult | None:
         queries=[str(value) for value in message.get("queries", []) if str(value).strip()],
         warnings=[str(value) for value in warnings if str(value).strip()]
         or _search_snapshot_warnings(str(message.get("content", ""))),
+        provider_failures={
+            str(name): str(reason)
+            for name, reason in dict(message.get("provider_failures", {})).items()
+            if str(name).strip() and str(reason).strip()
+        }
+        if isinstance(message.get("provider_failures"), dict)
+        else {},
         artifact_path=Path(str(message["artifact_path"])) if message.get("artifact_path") else None,
     )
     return AgentRunResult(WorkMode.SEARCH, WorkMode.SEARCH, search=response)
@@ -712,11 +756,14 @@ def research_context_from_messages(messages: list[dict]) -> ResearchResult | Non
                 url=str(item.get("url", "")),
                 content="",
                 provider=str(item.get("provider", "")),
-                fetched=False,
+                query=str(item.get("query", question)),
+                fetched=bool(item.get("fetched", False)),
                 source_id=source_id,
                 resource_type=str(item.get("resource_type", "网页")),
                 risk_level=str(item.get("risk_level", "未验证")),
                 published_at=str(item.get("published_at", "")),
+                retrieved_at=str(item.get("retrieved_at", "")),
+                freshness_status=str(item.get("freshness_status", "unknown")),
             )
             for source_id, item in enumerate(message.get("sources", []), 1)
             if isinstance(item, dict)
@@ -740,6 +787,13 @@ def research_context_from_messages(messages: list[dict]) -> ResearchResult | Non
             validation=ValidationResult(True),
             direct_answer=str(message.get("summary", "")),
             review_summary=tuple(str(item) for item in message.get("review_summary", []) if str(item).strip()),
+            provider_failures={
+                str(name): str(reason)
+                for name, reason in dict(message.get("provider_failures", {})).items()
+                if str(name).strip() and str(reason).strip()
+            }
+            if isinstance(message.get("provider_failures"), dict)
+            else {},
         )
     return None
 
@@ -777,6 +831,7 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
         rounds = 0
         stop_reason = ""
         review_summary = []
+        provider_failures = {}
     elif run.search is not None:
         artifact = FileArtifactStorage(settings.conversation_dir.parent / "artifacts").save_search(run.search)
         content = search_response_markdown(run.search)
@@ -784,11 +839,14 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
             "title": item.title,
             "url": item.url,
             "snippet": item.snippet,
+            "query": item.query,
             "provider": item.provider,
             "resource_type": item.resource_type,
             "risk_level": item.risk_level,
             "risk_reasons": list(item.risk_reasons),
             "published_at": item.published_at,
+            "retrieved_at": item.retrieved_at,
+            "freshness_status": item.freshness_status,
         } for item in run.search.items]
         kind = "search"
         question = run.search.query
@@ -796,6 +854,7 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
         rounds = 0
         stop_reason = ""
         review_summary = []
+        provider_failures = dict(run.search.provider_failures)
     else:
         result = run.research
         if result is None:
@@ -804,8 +863,12 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
         content = result.report
         sources = [{
             "title": item.title, "url": item.url, "provider": item.provider,
+            "query": item.query,
+            "fetched": item.fetched,
             "resource_type": item.resource_type, "risk_level": item.risk_level,
             "published_at": item.published_at,
+            "retrieved_at": item.retrieved_at,
+            "freshness_status": item.freshness_status,
         } for item in result.sources]
         kind = "research"
         question = result.question
@@ -813,6 +876,15 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
         rounds = result.rounds
         stop_reason = result.stop_reason
         review_summary = list(result.review_summary)
+        provider_failures = dict(result.provider_failures)
+    audit = run.audit or RunAudit(
+        run.requested_mode,
+        run.resolved_mode,
+        run.chat.model_name if run.chat is not None else settings.llm.model if run.research is not None else "",
+        run.resolved_mode in {WorkMode.SEARCH, WorkMode.RESEARCH},
+        tuple(dict.fromkeys(str(item.get("provider", "")).split("/", 1)[0] for item in sources if item.get("provider"))),
+        ContextPolicy.FRESH,
+    )
     return {
         "message_id": message_id if re.fullmatch(r"[0-9a-f]{32}", message_id) else uuid4().hex,
         "role": "assistant",
@@ -827,9 +899,14 @@ def _message_from_run(run: AgentRunResult, settings: Settings, message_id: str) 
         "rounds": rounds,
         "stop_reason": stop_reason,
         "review_summary": review_summary,
+        "provider_failures": provider_failures,
         "queries": list(run.search.queries) if run.search is not None else [],
         "warnings": list(run.search.warnings) if run.search is not None else [],
         "used_fallback": bool(run.chat.used_fallback) if run.chat is not None else False,
+        "model_name": audit.model_name,
+        "used_search": audit.used_search,
+        "search_providers": list(audit.search_providers),
+        "context_policy": audit.context_policy.value,
     }
 
 
